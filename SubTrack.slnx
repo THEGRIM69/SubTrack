@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/SubTrack.Core/SubTrack.Core.csproj" />
+    <Project Path="src/SubTrack.Infrastructure/SubTrack.Infrastructure.csproj" />
+    <Project Path="src/SubTrack.WinForms/SubTrack.WinForms.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/SubTrack.Tests/SubTrack.Tests.csproj" />
+  </Folder>
+</Solution>
