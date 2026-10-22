@@ -27,6 +27,8 @@ internal sealed class MainForm : Form
         _navigationBar = new BottomNavigationBar();
         _navigationBar.SectionSelected += (_, section) => ShowSection(section);
 
+        var header = CreateHeader();
+
         var navigationHost = new TableLayoutPanel
         {
             BackColor = AppTheme.WindowBackground,
@@ -44,8 +46,24 @@ internal sealed class MainForm : Form
         navigationHost.Controls.Add(_navigationBar, 1, 0);
         _navigationBar.Anchor = AnchorStyles.None;
 
-        Controls.Add(_contentPanel);
-        Controls.Add(navigationHost);
+        var appLayout = new TableLayoutPanel
+        {
+            BackColor = AppTheme.WindowBackground,
+            ColumnCount = 1,
+            Dock = DockStyle.Fill,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            RowCount = 3
+        };
+        appLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        appLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 82F));
+        appLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+        appLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 86F));
+        appLayout.Controls.Add(header, 0, 0);
+        appLayout.Controls.Add(_contentPanel, 0, 1);
+        appLayout.Controls.Add(navigationHost, 0, 2);
+
+        Controls.Add(appLayout);
 
         _views = new Dictionary<string, UserControl>
         {
@@ -58,6 +76,101 @@ internal sealed class MainForm : Form
         };
 
         ShowSection("Dashboard");
+    }
+
+    private static Control CreateHeader()
+    {
+        var header = new Panel
+        {
+            BackColor = AppTheme.Surface,
+            Dock = DockStyle.Fill,
+            Margin = Padding.Empty,
+            Padding = new Padding(32, 16, 32, 15)
+        };
+        header.Paint += (_, e) =>
+        {
+            using var pen = new Pen(AppTheme.Border);
+            e.Graphics.DrawLine(pen, 0, header.ClientSize.Height - 1, header.ClientSize.Width, header.ClientSize.Height - 1);
+        };
+
+        var layout = new TableLayoutPanel
+        {
+            BackColor = AppTheme.Surface,
+            ColumnCount = 4,
+            Dock = DockStyle.Fill,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            RowCount = 1
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 320F));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 60F));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+
+        var brand = new Label
+        {
+            AccessibleName = "Nombre de la aplicación",
+            AutoSize = true,
+            Font = AppTheme.BrandFont,
+            ForeColor = AppTheme.TextPrimary,
+            Margin = Padding.Empty,
+            Text = "SubTrack 1.0",
+            TextAlign = ContentAlignment.MiddleLeft
+        };
+        brand.Anchor = AnchorStyles.Left;
+
+        var searchHost = new Panel
+        {
+            AccessibleName = "Buscar",
+            BackColor = AppTheme.WindowBackground,
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 2, 12, 2),
+            Padding = new Padding(14, 0, 14, 0)
+        };
+        searchHost.Paint += (_, e) =>
+        {
+            using var pen = new Pen(AppTheme.Border);
+            e.Graphics.DrawRectangle(pen, 0, 0, searchHost.ClientSize.Width - 1, searchHost.ClientSize.Height - 1);
+        };
+
+        var searchText = new Label
+        {
+            AutoEllipsis = true,
+            BackColor = AppTheme.WindowBackground,
+            Dock = DockStyle.Fill,
+            Font = AppTheme.SearchFont,
+            ForeColor = AppTheme.TextSecondary,
+            Text = "⌕  Buscar...",
+            TextAlign = ContentAlignment.MiddleLeft
+        };
+        searchHost.Controls.Add(searchText);
+
+        var settingsButton = new Button
+        {
+            AccessibleName = "Configuración",
+            AccessibleDescription = "Abrir configuración",
+            BackColor = AppTheme.Surface,
+            Cursor = Cursors.Hand,
+            Dock = DockStyle.Fill,
+            FlatStyle = FlatStyle.Flat,
+            Font = new Font("Segoe UI Symbol", 16F, FontStyle.Regular),
+            ForeColor = AppTheme.TextPrimary,
+            Margin = new Padding(8, 2, 0, 2),
+            TabStop = true,
+            Text = "⚙",
+            UseVisualStyleBackColor = false
+        };
+        settingsButton.FlatAppearance.BorderColor = AppTheme.Border;
+        settingsButton.FlatAppearance.BorderSize = 1;
+        settingsButton.FlatAppearance.MouseOverBackColor = AppTheme.PrimarySoft;
+
+        layout.Controls.Add(brand, 0, 0);
+        layout.Controls.Add(searchHost, 2, 0);
+        layout.Controls.Add(settingsButton, 3, 0);
+        header.Controls.Add(layout);
+
+        return header;
     }
 
     private void ShowSection(string section)
