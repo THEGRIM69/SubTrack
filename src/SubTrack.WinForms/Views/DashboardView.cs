@@ -11,6 +11,8 @@ internal sealed class DashboardView : UserControl
     private const float ActivityAmountColumnWidth = 116F;
     private const float StatusColumnWidth = 112F;
     private readonly Panel _heading;
+    private readonly Button _summaryToggle;
+    private readonly FinancialSummaryPanel _financialSummary;
     private readonly DashboardCard _upcomingCharges;
     private readonly DashboardCard _recentActivity;
 
@@ -21,11 +23,15 @@ internal sealed class DashboardView : UserControl
         BackColor = AppTheme.WindowBackground;
         Dock = DockStyle.Fill;
 
-        _heading = CreateHeading();
+        _summaryToggle = CreateSummaryToggle();
+        _heading = CreateHeading(_summaryToggle);
+        _financialSummary = new FinancialSummaryPanel { Visible = false };
         _upcomingCharges = CreateUpcomingChargesCard();
         _recentActivity = CreateRecentActivityCard();
+        _summaryToggle.Click += (_, _) => ToggleFinancialSummary();
 
         Controls.Add(_heading);
+        Controls.Add(_financialSummary);
         Controls.Add(_upcomingCharges);
         Controls.Add(_recentActivity);
 
@@ -38,7 +44,8 @@ internal sealed class DashboardView : UserControl
 
         // WinForms can request layout while the base Control constructor is still
         // applying properties, before this view has created its child controls.
-        if (_heading is null || _upcomingCharges is null || _recentActivity is null)
+        if (_heading is null || _summaryToggle is null || _financialSummary is null ||
+            _upcomingCharges is null || _recentActivity is null)
         {
             return;
         }
@@ -49,30 +56,53 @@ internal sealed class DashboardView : UserControl
         int headingGap = ScaleLogical(22);
         int cardGap = ScaleLogical(18);
         int cardHeight = ScaleLogical(334);
+        int summaryWidth = ScaleLogical(310);
+        int summaryHeight = ScaleLogical(704);
+        int minimumSideBySideWidth = ScaleLogical(860);
         int bottom = ScaleLogical(30);
         int scrollAllowance = VerticalScroll.Visible ? SystemInformation.VerticalScrollBarWidth : 0;
         int availableWidth = Math.Max(ScaleLogical(360), ClientSize.Width - (outerHorizontal * 2) - scrollAllowance);
 
         _heading.SetBounds(outerHorizontal, top, availableWidth, headingHeight);
-        int cardsTop = top + headingHeight + headingGap;
-        int twoColumnCardWidth = (availableWidth - cardGap) / 2;
+        int contentTop = top + headingHeight + headingGap;
 
-        if (twoColumnCardWidth >= ScaleLogical(MinimumTwoColumnCardWidth))
+        if (!_financialSummary.Visible)
         {
-            _upcomingCharges.SetBounds(outerHorizontal, cardsTop, twoColumnCardWidth, cardHeight);
-            _recentActivity.SetBounds(
-                outerHorizontal + twoColumnCardWidth + cardGap,
-                cardsTop,
-                twoColumnCardWidth,
-                cardHeight);
-            SetAutoScrollMinSize(new Size(0, cardsTop + cardHeight + bottom));
+            int cardsBottom = LayoutCards(outerHorizontal, contentTop, availableWidth, cardGap, cardHeight);
+            SetAutoScrollMinSize(new Size(0, cardsBottom + bottom));
+            return;
+        }
+
+        if (availableWidth >= minimumSideBySideWidth)
+        {
+            int mainLeft = outerHorizontal + summaryWidth + cardGap;
+            int mainWidth = availableWidth - summaryWidth - cardGap;
+            _financialSummary.SetBounds(outerHorizontal, contentTop, summaryWidth, summaryHeight);
+            int cardsBottom = LayoutCards(mainLeft, contentTop, mainWidth, cardGap, cardHeight);
+            SetAutoScrollMinSize(new Size(0, Math.Max(contentTop + summaryHeight, cardsBottom) + bottom));
         }
         else
         {
-            _upcomingCharges.SetBounds(outerHorizontal, cardsTop, availableWidth, cardHeight);
-            _recentActivity.SetBounds(outerHorizontal, cardsTop + cardHeight + cardGap, availableWidth, cardHeight);
-            SetAutoScrollMinSize(new Size(0, cardsTop + (cardHeight * 2) + cardGap + bottom));
+            _financialSummary.SetBounds(outerHorizontal, contentTop, availableWidth, summaryHeight);
+            int cardsTop = contentTop + summaryHeight + cardGap;
+            int cardsBottom = LayoutCards(outerHorizontal, cardsTop, availableWidth, cardGap, cardHeight);
+            SetAutoScrollMinSize(new Size(0, cardsBottom + bottom));
         }
+    }
+
+    private int LayoutCards(int left, int top, int availableWidth, int gap, int cardHeight)
+    {
+        int twoColumnCardWidth = (availableWidth - gap) / 2;
+        if (twoColumnCardWidth >= ScaleLogical(MinimumTwoColumnCardWidth))
+        {
+            _upcomingCharges.SetBounds(left, top, twoColumnCardWidth, cardHeight);
+            _recentActivity.SetBounds(left + twoColumnCardWidth + gap, top, twoColumnCardWidth, cardHeight);
+            return top + cardHeight;
+        }
+
+        _upcomingCharges.SetBounds(left, top, availableWidth, cardHeight);
+        _recentActivity.SetBounds(left, top + cardHeight + gap, availableWidth, cardHeight);
+        return top + (cardHeight * 2) + gap;
     }
 
     private int ScaleLogical(int value) => value * DeviceDpi / 96;
@@ -85,7 +115,40 @@ internal sealed class DashboardView : UserControl
         }
     }
 
-    private static Panel CreateHeading()
+    private void ToggleFinancialSummary()
+    {
+        SuspendLayout();
+        _financialSummary.Visible = !_financialSummary.Visible;
+        _summaryToggle.Text = _financialSummary.Visible ? "Ocultar resumen" : "Ver resumen";
+        _summaryToggle.AccessibleDescription = _financialSummary.Visible
+            ? "Ocultar el resumen financiero de demostración"
+            : "Mostrar el resumen financiero de demostración";
+        ResumeLayout(true);
+    }
+
+    private static Button CreateSummaryToggle()
+    {
+        var button = new Button
+        {
+            AccessibleName = "Resumen financiero",
+            AccessibleDescription = "Mostrar el resumen financiero de demostración",
+            BackColor = AppTheme.Surface,
+            Cursor = Cursors.Hand,
+            FlatStyle = FlatStyle.Flat,
+            Font = AppTheme.NavigationActiveFont,
+            ForeColor = AppTheme.Primary,
+            Height = 34,
+            TabStop = true,
+            Text = "Ver resumen",
+            UseVisualStyleBackColor = false,
+            Width = 126
+        };
+        button.FlatAppearance.BorderColor = AppTheme.Border;
+        button.FlatAppearance.MouseOverBackColor = AppTheme.PrimarySoft;
+        return button;
+    }
+
+    private static Panel CreateHeading(Button summaryToggle)
     {
         var heading = new Panel
         {
@@ -124,12 +187,17 @@ internal sealed class DashboardView : UserControl
             Top = 5,
             Width = 190
         };
-        demoBadge.Left = heading.Width - demoBadge.Width;
-        heading.Resize += (_, _) => demoBadge.Left = heading.ClientSize.Width - demoBadge.Width;
+        summaryToggle.Top = 1;
+        heading.Resize += (_, _) =>
+        {
+            summaryToggle.Left = heading.ClientSize.Width - summaryToggle.Width;
+            demoBadge.Left = summaryToggle.Left - demoBadge.Width - 12;
+        };
 
         heading.Controls.Add(title);
         heading.Controls.Add(subtitle);
         heading.Controls.Add(demoBadge);
+        heading.Controls.Add(summaryToggle);
         return heading;
     }
 
@@ -339,6 +407,284 @@ internal sealed class DashboardView : UserControl
         };
         host.Controls.Add(label, 0, 1);
         return host;
+    }
+
+    private sealed class FinancialSummaryPanel : Panel
+    {
+        private readonly TableLayoutPanel _layout;
+
+        public FinancialSummaryPanel()
+        {
+            BackColor = AppTheme.Surface;
+            DoubleBuffered = true;
+            Margin = Padding.Empty;
+            Padding = new Padding(1);
+
+            _layout = new TableLayoutPanel
+            {
+                BackColor = AppTheme.Surface,
+                ColumnCount = 1,
+                Dock = DockStyle.Fill,
+                Margin = Padding.Empty,
+                Padding = new Padding(16, 12, 16, 14),
+                RowCount = 4
+            };
+            _layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            _layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 70F));
+            _layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 172F));
+            _layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 204F));
+            _layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+
+            _layout.Controls.Add(CreateSummaryHeader(), 0, 0);
+            _layout.Controls.Add(CreateMetricsGrid(), 0, 1);
+            _layout.Controls.Add(new MonthlyBarChart(), 0, 2);
+            _layout.Controls.Add(new ExpenseDonutChart(), 0, 3);
+            Controls.Add(_layout);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            Rectangle bounds = ClientRectangle;
+            bounds.Width--;
+            bounds.Height--;
+            using GraphicsPath path = CreateRoundedPath(bounds, 14);
+            using var pen = new Pen(AppTheme.Border);
+            e.Graphics.DrawPath(pen, path);
+        }
+
+        protected override void OnResize(EventArgs eventargs)
+        {
+            base.OnResize(eventargs);
+            Rectangle bounds = ClientRectangle;
+            bounds.Width--;
+            bounds.Height--;
+            using GraphicsPath path = CreateRoundedPath(bounds, 14);
+            Region? previous = Region;
+            Region = new Region(path);
+            previous?.Dispose();
+        }
+
+        private static Control CreateSummaryHeader()
+        {
+            var header = new TableLayoutPanel
+            {
+                BackColor = AppTheme.Surface,
+                ColumnCount = 1,
+                Dock = DockStyle.Fill,
+                Margin = Padding.Empty,
+                RowCount = 2
+            };
+            header.RowStyles.Add(new RowStyle(SizeType.Percent, 55F));
+            header.RowStyles.Add(new RowStyle(SizeType.Percent, 45F));
+            header.Controls.Add(new Label
+            {
+                Dock = DockStyle.Fill,
+                Font = AppTheme.PanelTitleFont,
+                ForeColor = AppTheme.TextPrimary,
+                Margin = Padding.Empty,
+                Text = "Resumen mensual",
+                TextAlign = ContentAlignment.BottomLeft
+            }, 0, 0);
+            header.Controls.Add(new Label
+            {
+                Dock = DockStyle.Fill,
+                Font = AppTheme.CaptionBoldFont,
+                ForeColor = AppTheme.Primary,
+                Margin = Padding.Empty,
+                Text = "DATOS DE DEMOSTRACIÓN",
+                TextAlign = ContentAlignment.TopLeft
+            }, 0, 1);
+            return header;
+        }
+
+        private static Control CreateMetricsGrid()
+        {
+            var grid = new TableLayoutPanel
+            {
+                BackColor = AppTheme.Surface,
+                ColumnCount = 2,
+                Dock = DockStyle.Fill,
+                Margin = Padding.Empty,
+                Padding = Padding.Empty,
+                RowCount = 2
+            };
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+            grid.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+            grid.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+            grid.Controls.Add(CreateMetric("Ingresos del mes", "$850.00", AppTheme.Success), 0, 0);
+            grid.Controls.Add(CreateMetric("Gastos del mes", "$176.48", AppTheme.TextPrimary), 1, 0);
+            grid.Controls.Add(CreateMetric("Suscripciones", "$28.48", AppTheme.Primary), 0, 1);
+            grid.Controls.Add(CreateMetric("Saldo disponible", "$673.52", AppTheme.Success), 1, 1);
+            return grid;
+        }
+
+        private static Control CreateMetric(string caption, string value, Color valueColor)
+        {
+            var metric = new TableLayoutPanel
+            {
+                BackColor = AppTheme.WindowBackground,
+                Dock = DockStyle.Fill,
+                Margin = new Padding(3),
+                Padding = new Padding(9, 5, 9, 5),
+                RowCount = 2
+            };
+            metric.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+            metric.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+            metric.Controls.Add(new Label
+            {
+                AutoEllipsis = true,
+                Dock = DockStyle.Fill,
+                Font = AppTheme.CaptionFont,
+                ForeColor = AppTheme.TextSecondary,
+                Margin = Padding.Empty,
+                Text = caption,
+                TextAlign = ContentAlignment.BottomLeft
+            }, 0, 0);
+            metric.Controls.Add(new Label
+            {
+                AutoEllipsis = false,
+                Dock = DockStyle.Fill,
+                Font = AppTheme.ItemBoldFont,
+                ForeColor = valueColor,
+                Margin = Padding.Empty,
+                Text = value,
+                TextAlign = ContentAlignment.TopLeft
+            }, 0, 1);
+            return metric;
+        }
+
+        private static GraphicsPath CreateRoundedPath(Rectangle bounds, int radius)
+        {
+            var path = new GraphicsPath();
+            if (bounds.Width <= 0 || bounds.Height <= 0)
+            {
+                return path;
+            }
+
+            int diameter = radius * 2;
+            var arc = new Rectangle(bounds.Left, bounds.Top, diameter, diameter);
+            path.AddArc(arc, 180, 90);
+            arc.X = bounds.Right - diameter;
+            path.AddArc(arc, 270, 90);
+            arc.Y = bounds.Bottom - diameter;
+            path.AddArc(arc, 0, 90);
+            arc.X = bounds.Left;
+            path.AddArc(arc, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+    }
+
+    private sealed class MonthlyBarChart : Control
+    {
+        public MonthlyBarChart()
+        {
+            BackColor = AppTheme.Surface;
+            Dock = DockStyle.Fill;
+            Margin = new Padding(3, 10, 3, 6);
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            TextRenderer.DrawText(e.Graphics, "Gráfico mensual", AppTheme.ItemBoldFont,
+                new Point(4, 2), AppTheme.TextPrimary);
+            TextRenderer.DrawText(e.Graphics, "Valores demostrativos", AppTheme.CaptionFont,
+                new Point(4, 23), AppTheme.TextSecondary);
+
+            int chartTop = 50;
+            int chartBottom = Math.Max(chartTop + 30, Height - 31);
+            int chartHeight = chartBottom - chartTop;
+            int center = Width / 2;
+            int barWidth = Math.Max(28, Math.Min(46, Width / 6));
+            int incomeHeight = Math.Max(20, (int)(chartHeight * .82F));
+            int expenseHeight = Math.Max(12, (int)(chartHeight * .38F));
+            var incomeBar = new Rectangle(center - barWidth - 16, chartBottom - incomeHeight, barWidth, incomeHeight);
+            var expenseBar = new Rectangle(center + 16, chartBottom - expenseHeight, barWidth, expenseHeight);
+
+            using (var gridPen = new Pen(AppTheme.Border))
+            {
+                e.Graphics.DrawLine(gridPen, 8, chartBottom, Width - 8, chartBottom);
+            }
+            using (var incomeBrush = new SolidBrush(AppTheme.Primary))
+            using (var expenseBrush = new SolidBrush(AppTheme.Warning))
+            {
+                e.Graphics.FillRectangle(incomeBrush, incomeBar);
+                e.Graphics.FillRectangle(expenseBrush, expenseBar);
+            }
+
+            DrawCenteredText(e.Graphics, "$850", incomeBar.Left - 12, incomeBar.Top - 18, incomeBar.Width + 24, AppTheme.Primary);
+            DrawCenteredText(e.Graphics, "$176", expenseBar.Left - 12, expenseBar.Top - 18, expenseBar.Width + 24, AppTheme.Warning);
+            DrawCenteredText(e.Graphics, "Ingresos", incomeBar.Left - 20, chartBottom + 4, incomeBar.Width + 40, AppTheme.TextSecondary);
+            DrawCenteredText(e.Graphics, "Gastos", expenseBar.Left - 20, chartBottom + 4, expenseBar.Width + 40, AppTheme.TextSecondary);
+        }
+
+        private static void DrawCenteredText(Graphics graphics, string text, int x, int y, int width, Color color)
+        {
+            TextRenderer.DrawText(graphics, text, AppTheme.CaptionFont, new Rectangle(x, y, width, 18), color,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+        }
+    }
+
+    private sealed class ExpenseDonutChart : Control
+    {
+        private static readonly Color[] SegmentColors =
+        [
+            AppTheme.Primary,
+            AppTheme.Warning,
+            Color.FromArgb(116, 93, 196)
+        ];
+
+        public ExpenseDonutChart()
+        {
+            BackColor = AppTheme.Surface;
+            Dock = DockStyle.Fill;
+            Margin = new Padding(3, 8, 3, 3);
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            TextRenderer.DrawText(e.Graphics, "Distribución de gastos", AppTheme.ItemBoldFont,
+                new Point(4, 2), AppTheme.TextPrimary);
+            TextRenderer.DrawText(e.Graphics, "Categorías demostrativas", AppTheme.CaptionFont,
+                new Point(4, 23), AppTheme.TextSecondary);
+
+            int donutSize = Math.Max(76, Math.Min(112, Math.Min(Height - 58, Width / 2)));
+            var donutBounds = new Rectangle(8, 50, donutSize, donutSize);
+            float startAngle = -90F;
+            float[] sweeps = [162F, 126F, 72F];
+            for (int index = 0; index < sweeps.Length; index++)
+            {
+                using var brush = new SolidBrush(SegmentColors[index]);
+                e.Graphics.FillPie(brush, donutBounds, startAngle, sweeps[index]);
+                startAngle += sweeps[index];
+            }
+
+            Rectangle inner = Rectangle.Inflate(donutBounds, -donutSize / 4, -donutSize / 4);
+            using (var centerBrush = new SolidBrush(AppTheme.Surface))
+            {
+                e.Graphics.FillEllipse(centerBrush, inner);
+            }
+
+            string[] labels = ["Servicios 45%", "Hogar 35%", "Otros 20%"];
+            int legendX = donutBounds.Right + 14;
+            int legendY = donutBounds.Top + 7;
+            for (int index = 0; index < labels.Length; index++)
+            {
+                using var brush = new SolidBrush(SegmentColors[index]);
+                e.Graphics.FillEllipse(brush, legendX, legendY + (index * 29) + 4, 10, 10);
+                TextRenderer.DrawText(e.Graphics, labels[index], AppTheme.CaptionFont,
+                    new Point(legendX + 16, legendY + (index * 29)), AppTheme.TextSecondary);
+            }
+        }
     }
 
     private enum DashboardIcon
