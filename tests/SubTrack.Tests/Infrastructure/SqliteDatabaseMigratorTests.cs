@@ -27,23 +27,40 @@ public sealed class SqliteDatabaseMigratorTests : IDisposable
     }
 
     [Fact]
-    public async Task MigrateAsync_WithDefaultProvider_EnsuresMigrationTableAndReturnsZeroApplied()
+    public async Task MigrateAsync_WithDefaultProvider_AppliesOfficialInitialSchema()
     {
         var migrator = new SqliteDatabaseMigrator(_options);
 
         var result = await migrator.MigrateAsync();
 
         Assert.True(result.Success);
-        Assert.True(result.IsUpToDate);
+        Assert.False(result.IsUpToDate);
         Assert.Equal(0, result.InitialVersion);
-        Assert.Equal(0, result.FinalVersion);
-        Assert.Empty(result.AppliedMigrations);
+        Assert.Equal(OfficialMigrations.InitialSchemaVersion, result.FinalVersion);
+        Assert.Single(result.AppliedMigrations);
+        Assert.Equal(OfficialMigrations.InitialSchemaVersion, result.AppliedMigrations[0].Version);
 
         var currentVersion = await migrator.GetCurrentVersionAsync();
-        Assert.Equal(0, currentVersion);
+        Assert.Equal(OfficialMigrations.InitialSchemaVersion, currentVersion);
 
         var history = await migrator.GetAppliedMigrationsAsync();
-        Assert.Empty(history);
+        Assert.Single(history);
+        Assert.Equal(OfficialMigrations.InitialSchemaName, history[0].Name);
+    }
+
+    [Fact]
+    public async Task MigrateAsync_WithDefaultProvider_IsIdempotentOnSecondRun()
+    {
+        var migrator = new SqliteDatabaseMigrator(_options);
+
+        await migrator.MigrateAsync();
+        var secondResult = await migrator.MigrateAsync();
+
+        Assert.True(secondResult.Success);
+        Assert.True(secondResult.IsUpToDate);
+        Assert.Equal(OfficialMigrations.InitialSchemaVersion, secondResult.InitialVersion);
+        Assert.Equal(OfficialMigrations.InitialSchemaVersion, secondResult.FinalVersion);
+        Assert.Empty(secondResult.AppliedMigrations);
     }
 
     [Fact]
