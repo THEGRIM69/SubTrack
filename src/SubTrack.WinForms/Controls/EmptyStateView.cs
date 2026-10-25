@@ -4,7 +4,14 @@ namespace SubTrack.WinForms.Controls;
 
 internal class EmptyStateView : UserControl
 {
-    public EmptyStateView(string title, string description, string symbol)
+    public EmptyStateView(
+        string title,
+        string description,
+        string symbol,
+        string? actionText = null,
+        EventHandler? onActionClick = null,
+        string? emptyTitleText = null,
+        string? emptyDescriptionText = null)
     {
         Dock = DockStyle.Fill;
         BackColor = AppTheme.WindowBackground;
@@ -43,7 +50,7 @@ internal class EmptyStateView : UserControl
             Font = new Font("Segoe UI", 13F, FontStyle.Bold),
             ForeColor = AppTheme.TextPrimary,
             Margin = new Padding(0, 0, 0, 7),
-            Text = "Aún no hay información para mostrar"
+            Text = emptyTitleText ?? "Aún no hay información para mostrar"
         };
 
         var emptyDescription = new Label
@@ -52,7 +59,7 @@ internal class EmptyStateView : UserControl
             Font = AppTheme.SubtitleFont,
             ForeColor = AppTheme.TextSecondary,
             MaximumSize = new Size(460, 0),
-            Text = "Esta sección estará lista para mostrar información cuando se conecten los servicios de la aplicación.",
+            Text = emptyDescriptionText ?? "Esta sección estará lista para mostrar información cuando se conecten los servicios de la aplicación.",
             TextAlign = ContentAlignment.MiddleCenter
         };
 
@@ -72,9 +79,9 @@ internal class EmptyStateView : UserControl
             Anchor = AnchorStyles.None,
             BackColor = AppTheme.Surface,
             ColumnCount = 1,
-            Height = 250,
+            Height = 280,
             Margin = Padding.Empty,
-            Padding = new Padding(40, 30, 40, 30),
+            Padding = new Padding(40, 24, 40, 24),
             RowCount = 3,
             Width = 560
         };
@@ -97,6 +104,29 @@ internal class EmptyStateView : UserControl
         message.Controls.Add(emptySymbol);
         message.Controls.Add(emptyTitle);
         message.Controls.Add(emptyDescription);
+
+        if (!string.IsNullOrEmpty(actionText) && onActionClick is not null)
+        {
+            var actionBtn = new Button
+            {
+                Anchor = AnchorStyles.None,
+                BackColor = AppTheme.Primary,
+                Cursor = Cursors.Hand,
+                FlatStyle = FlatStyle.Flat,
+                Font = AppTheme.NavigationActiveFont,
+                ForeColor = AppTheme.Surface,
+                Height = 36,
+                Margin = new Padding(0, 14, 0, 0),
+                TabStop = true,
+                Text = actionText,
+                UseVisualStyleBackColor = false,
+                Width = 180
+            };
+            actionBtn.FlatAppearance.BorderSize = 0;
+            actionBtn.Click += onActionClick;
+            message.Controls.Add(actionBtn);
+        }
+
         emptyCard.Controls.Add(message, 0, 1);
 
         var contentGrid = new TableLayoutPanel
