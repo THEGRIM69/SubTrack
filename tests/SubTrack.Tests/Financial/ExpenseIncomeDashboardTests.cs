@@ -359,6 +359,56 @@ public sealed class ExpenseIncomeDashboardTests : IDisposable
     }
 
     [Fact]
+    public async Task Plantillas_ListanOrdenadasYRespetanInactivas()
+    {
+        var services = await CreateServicesAsync();
+
+        var zeta = await services.Incomes.CreateTemplateAsync(
+            new CreateIncomeTemplateRequest(
+                "Zeta",
+                100_000,
+                IncomeType.Monthly,
+                5,
+                new DateOnly(2026, 10, 1),
+                Guid.NewGuid()));
+
+        var alfa = await services.Incomes.CreateTemplateAsync(
+            new CreateIncomeTemplateRequest(
+                "Alfa",
+                200_000,
+                IncomeType.Monthly,
+                10,
+                new DateOnly(2026, 10, 1),
+                Guid.NewGuid()));
+
+        Assert.True(zeta.IsSuccess, Describe(zeta));
+        Assert.True(alfa.IsSuccess, Describe(alfa));
+
+        var active = await services.Incomes.GetTemplatesAsync(includeInactive: false);
+
+        Assert.True(active.IsSuccess, Describe(active));
+        Assert.Equal(new[] { "Alfa", "Zeta" }, active.Value.Select(template => template.Concept));
+
+        await using (var connection = new SqliteConnection($"Data Source={_options.DatabasePath};Pooling=False"))
+        {
+            await connection.OpenAsync();
+
+            await using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE ingresos_plantillas SET activa = 0 WHERE id = $id";
+            command.Parameters.AddWithValue("$id", zeta.Value.Id.ToString());
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var withoutInactive = await services.Incomes.GetTemplatesAsync(includeInactive: false);
+        var withInactive = await services.Incomes.GetTemplatesAsync(includeInactive: true);
+
+        Assert.True(withoutInactive.IsSuccess, Describe(withoutInactive));
+        Assert.True(withInactive.IsSuccess, Describe(withInactive));
+        Assert.Equal(new[] { "Alfa" }, withoutInactive.Value.Select(template => template.Concept));
+        Assert.Equal(new[] { "Alfa", "Zeta" }, withInactive.Value.Select(template => template.Concept));
+    }
+
+    [Fact]
     public async Task IngresoExtraordinario_RequiereFechaReal()
     {
         var services = await CreateServicesAsync();

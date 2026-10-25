@@ -106,6 +106,19 @@ internal sealed class IncomeService : IIncomeService
         }
     }
 
+    public async Task<Result<IReadOnlyList<RecurringIncomeTemplate>>> GetTemplatesAsync(
+        bool includeInactive,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _factory.OpenAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        var templates = await _incomes.GetTemplatesAsync(connection, includeInactive, cancellationToken)
+            .ConfigureAwait(false);
+
+        return Result<IReadOnlyList<RecurringIncomeTemplate>>.Ok(templates);
+    }
+
     public async Task<Result<IReadOnlyList<Income>>> GeneratePlannedAsync(
         GeneratePlannedIncomesRequest request,
         CancellationToken cancellationToken = default)

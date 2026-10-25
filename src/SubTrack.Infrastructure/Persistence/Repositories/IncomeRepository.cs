@@ -351,6 +351,36 @@ internal sealed class IncomeRepository
             : null;
     }
 
+    public async Task<IReadOnlyList<RecurringIncomeTemplate>> GetTemplatesAsync(
+        SqliteConnection connection,
+        bool includeInactive,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand(
+            null,
+            """
+            SELECT id, concepto, operacion_id, monto_centavos, frecuencia, dia_ancla,
+                   fecha_inicio, activa, creado_en, actualizado_en
+            FROM ingresos_plantillas
+            WHERE $incluirInactivas = 1 OR activa = 1
+            ORDER BY concepto ASC;
+            """);
+
+        command.Parameters.AddWithValue("$incluirInactivas", includeInactive ? 1 : 0);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        var templates = new List<RecurringIncomeTemplate>();
+
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            templates.Add(MapTemplate(reader));
+        }
+
+        return templates;
+    }
+
     public async Task<RecurringIncomeTemplate?> GetTemplateByOperationIdAsync(
         SqliteConnection connection,
         SqliteTransaction? transaction,
