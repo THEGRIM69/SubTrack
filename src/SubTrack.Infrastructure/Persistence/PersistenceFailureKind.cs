@@ -16,5 +16,11 @@ public enum PersistenceFailureKind
     DiskFull,
     CannotOpen,
     NotADatabase,
-    ForeignDatabase
+    ForeignDatabase,
+    MigrationFailed,
+    ChecksumMismatch,
+    FutureVersion,
+    BackupFailed,
+    RestoreFailed,
+    InvalidBackup
 }

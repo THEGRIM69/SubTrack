@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using SubTrack.Core.Domain.Enums;
 using SubTrack.Core.Services;
 using Xunit;
@@ -20,7 +20,7 @@ public class NextChargeDateCalculatorTests
     {
         var lastDate = DateOnly.Parse(lastDateStr);
         var expected = DateOnly.Parse(expectedStr);
-        var result = NextChargeDateCalculator.CalculateNextDate(lastDate, freq);
+        var result = NextChargeDateCalculator.CalculateNextDate(lastDate, freq, lastDate.Day);
         Assert.Equal(expected, result);
     }
 
@@ -30,13 +30,14 @@ public class NextChargeDateCalculatorTests
         // Cast an int outside the defined enum values
         var invalidFreq = (BillingFrequency)999;
         var date = DateOnly.FromDateTime(DateTime.Today);
-        Assert.Throws<ArgumentOutOfRangeException>(() => NextChargeDateCalculator.CalculateNextDate(date, invalidFreq));
+        Assert.Throws<ArgumentOutOfRangeException>(() => NextChargeDateCalculator.CalculateNextDate(date, invalidFreq, date.Day));
     }
 
     [Fact]
     public void CalculateNextDate_DateOutOfRange_Throws()
     {
         var maxDate = DateOnly.MaxValue; // using max date to trigger overflow on next day
-        Assert.Throws<ArgumentOutOfRangeException>(() => NextChargeDateCalculator.CalculateNextDate(maxDate, BillingFrequency.Daily));
+        Assert.Throws<ArgumentOutOfRangeException>(() => NextChargeDateCalculator.CalculateNextDate(maxDate, BillingFrequency.Daily, maxDate.Day));
     }
 }
+

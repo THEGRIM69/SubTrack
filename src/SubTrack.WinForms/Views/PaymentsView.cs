@@ -1,8 +1,9 @@
-using SubTrack.WinForms.Controls;
-
 namespace SubTrack.WinForms.Views;
 
-internal sealed class PaymentsView : EmptyStateView
+internal sealed class PaymentsView : ChargesView
 {
-    public PaymentsView() : base("Pagos", "Historial de pagos de suscripciones", "✓") { }
+    public PaymentsView(ViewContext context)
+        : base(context, ChargesViewMode.Payments)
+    {
+    }
 }

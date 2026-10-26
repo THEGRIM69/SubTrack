@@ -1,51 +1,64 @@
-namespace SubTrack.Core.Services;
-
-using System;
 using SubTrack.Core.Domain.Enums;
 
+namespace SubTrack.Core.Services;
+
 /// <summary>
-/// Service that calculates the next scheduled charge date based on the previous scheduled date
-/// and the billing frequency. The calculation follows the rules confirmed in the documentation:
-///   • Daily – add 1 day
-///   • Weekly – add 7 days
-///   • Monthly – add 1 calendar month (DateOnly.AddMonths)
-///   • Quarterly – add 3 calendar months
-///   • Semi‑annual – add 6 calendar months
-///   • Annual – add 12 calendar months
-/// The method validates the inputs and throws technical exceptions for unknown frequencies
-/// or dates outside the allowed <see cref="DateOnly"/> range.
+/// F0-T31 — Calcula el siguiente vencimiento conservando el día original.
+/// Si el mes destino no tiene ese día, usa el último disponible sin mover
+/// permanentemente la programación: 31/01 → 28/02 → 31/03.
 /// </summary>
 public static class NextChargeDateCalculator
 {
     /// <summary>
-    /// Calculates the next scheduled date.
+    /// Calcula la fecha de cobro siguiente a <paramref name="lastScheduledDate"/>.
     /// </summary>
-    /// <param name="lastScheduledDate">The last programmed charge date.</param>
-    /// <param name="frequency">The billing frequency.</param>
-    /// <returns>The next scheduled charge date.</returns>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// Thrown when <paramref name="frequency"/> is not recognised.
-    /// </exception>
-    /// <exception cref="ArgumentException">
-    /// Thrown when the supplied date is outside the <see cref="DateOnly"/> bounds.
-    /// </exception>
-    public static DateOnly CalculateNextDate(DateOnly lastScheduledDate, BillingFrequency frequency)
+    /// <param name="lastScheduledDate">Última fecha programada.</param>
+    /// <param name="frequency">Frecuencia de cobro.</param>
+    /// <param name="anchorDay">Día original de vencimiento, entre 1 y 31.</param>
+    public static DateOnly CalculateNextDate(
+        DateOnly lastScheduledDate,
+        BillingFrequency frequency,
+        int anchorDay)
     {
-        // Technical validation of the date range – DateOnly supports 0001‑01‑01 to 9999‑12‑31.
-        if (lastScheduledDate < DateOnly.MinValue || lastScheduledDate > DateOnly.MaxValue)
+        if (anchorDay is < 1 or > 31)
         {
-            throw new ArgumentException($"Date {lastScheduledDate} is outside the valid DateOnly range.");
+            throw new ArgumentOutOfRangeException(
+                nameof(anchorDay),
+                anchorDay,
+                "El día ancla debe estar entre 1 y 31.");
         }
 
-        return frequency switch
+        var months = frequency switch
         {
-            BillingFrequency.Daily => lastScheduledDate.AddDays(1),
-            BillingFrequency.Weekly => lastScheduledDate.AddDays(7),
-            BillingFrequency.Monthly => lastScheduledDate.AddMonths(1),
-            BillingFrequency.Quarterly => lastScheduledDate.AddMonths(3),
-            BillingFrequency.SemiAnnual => lastScheduledDate.AddMonths(6),
-            BillingFrequency.Annual => lastScheduledDate.AddMonths(12),
-            _ => throw new ArgumentOutOfRangeException(nameof(frequency), $"Unsupported billing frequency: {frequency}")
+            BillingFrequency.Monthly => 1,
+            BillingFrequency.Quarterly => 3,
+            BillingFrequency.SemiAnnual => 6,
+            BillingFrequency.Annual => 12,
+            _ => 0
         };
+
+        if (months == 0)
+        {
+            return frequency switch
+            {
+                BillingFrequency.Daily => lastScheduledDate.AddDays(1),
+                BillingFrequency.Weekly => lastScheduledDate.AddDays(7),
+                _ => throw new ArgumentOutOfRangeException(
+                    nameof(frequency),
+                    frequency,
+                    "Frecuencia de cobro no soportada.")
+            };
+        }
+
+        var firstOfTargetMonth = new DateOnly(
+            lastScheduledDate.Year,
+            lastScheduledDate.Month,
+            1).AddMonths(months);
+
+        var day = Math.Min(
+            anchorDay,
+            DateTime.DaysInMonth(firstOfTargetMonth.Year, firstOfTargetMonth.Month));
+
+        return new DateOnly(firstOfTargetMonth.Year, firstOfTargetMonth.Month, day);
     }
 }

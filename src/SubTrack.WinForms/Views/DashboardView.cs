@@ -1,901 +1,520 @@
-using System.Drawing.Drawing2D;
-using SubTrack.WinForms.Themes;
+using SubTrack.Core.Contracts;
+using SubTrack.Core.Domain.Entities;
+using SubTrack.WinForms.Theme;
+using SubTrack.WinForms.UI;
 
 namespace SubTrack.WinForms.Views;
 
-internal sealed class DashboardView : UserControl
+internal sealed class DashboardView : ViewBase
 {
-    private const int MinimumTwoColumnCardWidth = 520;
-    private const float DateColumnWidth = 94F;
-    private const float ChargeAmountColumnWidth = 104F;
-    private const float ActivityAmountColumnWidth = 116F;
-    private const float StatusColumnWidth = 112F;
-    private readonly Panel _heading;
-    private readonly Button _summaryToggle;
-    private readonly FinancialSummaryPanel _financialSummary;
-    private readonly DashboardCard _upcomingCharges;
-    private readonly DashboardCard _recentActivity;
+    private readonly MonthStepper _month = new();
 
-    public DashboardView()
+    private readonly Label _balance = ValueLabel(28f, FontStyle.Bold, Color.White);
+    private readonly Label _balanceHint = Hint(8.5f, Color.FromArgb(146, 158, 168));
+    private readonly Label _projected = ValueLabel(19f, FontStyle.Bold, Palette.Text);
+    private readonly Label _projectedHint = Hint(8.5f, Palette.Muted);
+    private readonly Label _active = ValueLabel(26f, FontStyle.Bold, Palette.Text);
+    private readonly Label _activeHint = Hint(8.5f, Palette.Muted);
+
+    private readonly Label _income = ValueLabel(15f, FontStyle.Bold, Palette.Text);
+    private readonly Label _expenses = ValueLabel(15f, FontStyle.Bold, Palette.Text);
+    private readonly Label _payments = ValueLabel(15f, FontStyle.Bold, Palette.Text);
+    private readonly Label _total = ValueLabel(15f, FontStyle.Bold, Palette.Danger);
+
+    private readonly DataGridView _upcoming = Ui.Grid(("Fecha", 26f), ("Suscripción", 50f), ("Importe", 24f));
+    private readonly DataGridView _overdue = Ui.Grid(("Fecha", 26f), ("Suscripción", 50f), ("Importe", 24f));
+    private readonly Label _upcomingCount = Counter(Palette.PrimaryDeep);
+    private readonly Label _overdueCount = Counter(Palette.Danger);
+    private readonly BarsChart _chart = new();
+
+    private Dictionary<Guid, string> _names = new();
+
+    public DashboardView(ViewContext context)
+        : base(context)
     {
-        AutoScaleMode = AutoScaleMode.Dpi;
-        AutoScroll = true;
-        BackColor = AppTheme.WindowBackground;
-        Dock = DockStyle.Fill;
-
-        _summaryToggle = CreateSummaryToggle();
-        _heading = CreateHeading(_summaryToggle);
-        _financialSummary = new FinancialSummaryPanel { Visible = false };
-        _upcomingCharges = CreateUpcomingChargesCard();
-        _recentActivity = CreateRecentActivityCard();
-        _summaryToggle.Click += (_, _) => ToggleFinancialSummary();
-
-        Controls.Add(_heading);
-        Controls.Add(_financialSummary);
-        Controls.Add(_upcomingCharges);
-        Controls.Add(_recentActivity);
-
-        PerformLayout();
     }
 
-    protected override void OnLayout(LayoutEventArgs e)
+    public override string Title => "Resumen";
+
+    public override string Subtitle => "Tu foto financiera del mes, sin ruido.";
+
+    protected override void Build()
     {
-        base.OnLayout(e);
+        _month.MonthChanged += async () => await RefreshAsync();
 
-        // WinForms can request layout while the base Control constructor is still
-        // applying properties, before this view has created its child controls.
-        if (_heading is null || _summaryToggle is null || _financialSummary is null ||
-            _upcomingCharges is null || _recentActivity is null)
+        var caption = Ui.Caption("MES");
+        caption.Margin = new Padding(4, 13, 10, 0);
+
+        var root = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 4,
+            BackColor = Palette.Canvas,
+            Margin = new Padding(0),
+            Padding = new Padding(0)
+        };
+
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 178));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 110));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+        root.Controls.Add(
+            Ui.Toolbar(
+                new Control[] { caption, _month },
+                new Control[]
+                {
+                    Ui.Action("Generar cobros", GenerateAsync, ButtonKind.Primary),
+                    Ui.Action("Actualizar", RefreshAsync)
+                }),
+            0,
+            0);
+
+        root.Controls.Add(BuildHero(), 0, 1);
+        root.Controls.Add(BuildKpis(), 0, 2);
+        root.Controls.Add(BuildBottom(), 0, 3);
+
+        Ui.Align(_upcoming, "Importe");
+        Ui.Align(_overdue, "Importe");
+
+        Controls.Add(root);
+    }
+
+    protected override async Task LoadAsync()
+    {
+        var subscriptions = await Context.Services.Subscriptions.GetAllAsync();
+
+        if (Failed(subscriptions))
         {
             return;
         }
 
-        int outerHorizontal = ScaleLogical(40);
-        int top = ScaleLogical(30);
-        int headingHeight = ScaleLogical(58);
-        int headingGap = ScaleLogical(22);
-        int cardGap = ScaleLogical(18);
-        int cardHeight = ScaleLogical(334);
-        int summaryWidth = ScaleLogical(310);
-        int summaryHeight = ScaleLogical(704);
-        int minimumSideBySideWidth = ScaleLogical(860);
-        int bottom = ScaleLogical(30);
-        int scrollAllowance = VerticalScroll.Visible ? SystemInformation.VerticalScrollBarWidth : 0;
-        int availableWidth = Math.Max(ScaleLogical(360), ClientSize.Width - (outerHorizontal * 2) - scrollAllowance);
+        _names = subscriptions.Value.ToDictionary(subscription => subscription.Id, subscription => subscription.Name);
+        var active = subscriptions.Value.Count(subscription => subscription.IsActive);
 
-        _heading.SetBounds(outerHorizontal, top, availableWidth, headingHeight);
-        int contentTop = top + headingHeight + headingGap;
+        var result = await Context.Services.Dashboard.GetAsync(new GetDashboardRequest(_month.Month));
 
-        if (!_financialSummary.Visible)
+        if (Failed(result))
         {
-            int cardsBottom = LayoutCards(outerHorizontal, contentTop, availableWidth, cardGap, cardHeight);
-            SetAutoScrollMinSize(new Size(0, cardsBottom + bottom));
             return;
         }
 
-        if (availableWidth >= minimumSideBySideWidth)
+        var snapshot = result.Value;
+
+        _balance.Text = Format.Currency(snapshot.CurrentBalanceCents);
+        _balanceHint.Text = $"Inicial {Format.Currency(snapshot.OpeningBalanceCents)} · {Format.Month(snapshot.Month)}";
+
+        _projected.Text = Format.Currency(snapshot.ProjectedSavingsCents);
+        _projectedHint.Text = snapshot.ProjectedSavingsCents >= 0 ? "Al cierre del mes" : "Cierre en déficit";
+
+        _active.Text = active.ToString();
+        _activeHint.Text = snapshot.UpcomingCharges.Count == 0
+            ? "Sin cobros por venir"
+            : $"{snapshot.UpcomingCharges.Count} cobros por venir";
+
+        _income.Text = Format.Money(snapshot.IncomeCents);
+        _expenses.Text = Format.Money(snapshot.ExpensesCents);
+        _payments.Text = Format.Money(snapshot.SubscriptionPaymentsCents);
+        _total.Text = Format.Money(snapshot.TotalExpensesCents);
+
+        Fill(_upcoming, snapshot.UpcomingCharges);
+        Fill(_overdue, snapshot.OverdueCharges);
+
+        _upcomingCount.Text = snapshot.UpcomingCharges.Count == 0
+            ? "Sin pendientes"
+            : $"{snapshot.UpcomingCharges.Count} por cobrar";
+
+        _overdueCount.Text = snapshot.OverdueCharges.Count == 0
+            ? "Al día"
+            : $"{snapshot.OverdueCharges.Count} atrasados";
+
+        _overdueCount.ForeColor = snapshot.OverdueCharges.Count == 0 ? Palette.PrimaryDeep : Palette.Danger;
+
+        await LoadChartAsync();
+    }
+
+    private async Task LoadChartAsync()
+    {
+        var bars = new List<BarsChart.Bar>();
+        var start = _month.Month.ToDateTime(TimeOnly.MinValue);
+
+        for (var offset = 5; offset >= 0; offset--)
         {
-            int mainLeft = outerHorizontal + summaryWidth + cardGap;
-            int mainWidth = availableWidth - summaryWidth - cardGap;
-            _financialSummary.SetBounds(outerHorizontal, contentTop, summaryWidth, summaryHeight);
-            int cardsBottom = LayoutCards(mainLeft, contentTop, mainWidth, cardGap, cardHeight);
-            SetAutoScrollMinSize(new Size(0, Math.Max(contentTop + summaryHeight, cardsBottom) + bottom));
+            var month = DateOnly.FromDateTime(start.AddMonths(-offset));
+            var result = await Context.Services.Dashboard.GetAsync(new GetDashboardRequest(month));
+
+            if (!result.IsSuccess)
+            {
+                continue;
+            }
+
+            bars.Add(new BarsChart.Bar(
+                Format.MonthShort(month),
+                result.Value.IncomeCents,
+                result.Value.TotalExpensesCents));
+        }
+
+        _chart.SetData(bars);
+    }
+
+    private async Task GenerateAsync()
+    {
+        var today = DateOnly.FromDateTime(DateTime.Today);
+
+        var last = new DateOnly(
+            _month.Month.Year,
+            _month.Month.Month,
+            DateTime.DaysInMonth(_month.Month.Year, _month.Month.Month));
+
+        if (last < today)
+        {
+            Notify("No se pueden generar cobros de un mes pasado.", true);
+            return;
+        }
+
+        var subscriptions = await Context.Services.Subscriptions.GetAllAsync();
+
+        if (Failed(subscriptions))
+        {
+            return;
+        }
+
+        var created = 0;
+        var failures = new List<string>();
+
+        foreach (var subscription in subscriptions.Value.Where(item => item.IsActive))
+        {
+            var result = await Context.Services.Charges.GenerateAsync(
+                new GenerateChargesRequest(subscription.Id, last));
+
+            if (result.IsSuccess)
+            {
+                created += result.Value.Count;
+            }
+            else
+            {
+                failures.Add($"{subscription.Name}: {Describe(result.Errors)}");
+            }
+        }
+
+        if (failures.Count > 0)
+        {
+            Notify(failures[0], true);
         }
         else
         {
-            _financialSummary.SetBounds(outerHorizontal, contentTop, availableWidth, summaryHeight);
-            int cardsTop = contentTop + summaryHeight + cardGap;
-            int cardsBottom = LayoutCards(outerHorizontal, cardsTop, availableWidth, cardGap, cardHeight);
-            SetAutoScrollMinSize(new Size(0, cardsBottom + bottom));
+            Notify(created == 0 ? "No había cobros nuevos por generar." : $"{created} cobros generados.");
+        }
+
+        await RefreshAsync();
+    }
+
+    private void Fill(DataGridView grid, IReadOnlyList<ScheduledCharge> charges)
+    {
+        grid.Rows.Clear();
+
+        foreach (var charge in charges)
+        {
+            var name = _names.TryGetValue(charge.SubscriptionId, out var value) ? value : "—";
+
+            var index = grid.Rows.Add(
+                Format.Date(charge.ScheduledDate),
+                name,
+                Format.Money(charge.AmountCents));
+
+            grid.Rows[index].Tag = charge;
         }
     }
 
-    private int LayoutCards(int left, int top, int availableWidth, int gap, int cardHeight)
+    private Control BuildHero()
     {
-        int twoColumnCardWidth = (availableWidth - gap) / 2;
-        if (twoColumnCardWidth >= ScaleLogical(MinimumTwoColumnCardWidth))
+        var row = new TableLayoutPanel
         {
-            _upcomingCharges.SetBounds(left, top, twoColumnCardWidth, cardHeight);
-            _recentActivity.SetBounds(left + twoColumnCardWidth + gap, top, twoColumnCardWidth, cardHeight);
-            return top + cardHeight;
-        }
-
-        _upcomingCharges.SetBounds(left, top, availableWidth, cardHeight);
-        _recentActivity.SetBounds(left, top + cardHeight + gap, availableWidth, cardHeight);
-        return top + (cardHeight * 2) + gap;
-    }
-
-    private int ScaleLogical(int value) => value * DeviceDpi / 96;
-
-    private void SetAutoScrollMinSize(Size requiredSize)
-    {
-        if (AutoScrollMinSize != requiredSize)
-        {
-            AutoScrollMinSize = requiredSize;
-        }
-    }
-
-    private void ToggleFinancialSummary()
-    {
-        SuspendLayout();
-        _financialSummary.Visible = !_financialSummary.Visible;
-        _summaryToggle.Text = _financialSummary.Visible ? "Ocultar resumen" : "Ver resumen";
-        _summaryToggle.AccessibleDescription = _financialSummary.Visible
-            ? "Ocultar el resumen financiero de demostración"
-            : "Mostrar el resumen financiero de demostración";
-        ResumeLayout(true);
-    }
-
-    private static Button CreateSummaryToggle()
-    {
-        var button = new Button
-        {
-            AccessibleName = "Resumen financiero",
-            AccessibleDescription = "Mostrar el resumen financiero de demostración",
-            BackColor = AppTheme.Surface,
-            Cursor = Cursors.Hand,
-            FlatStyle = FlatStyle.Flat,
-            Font = AppTheme.NavigationActiveFont,
-            ForeColor = AppTheme.Primary,
-            Height = 34,
-            TabStop = true,
-            Text = "Ver resumen",
-            UseVisualStyleBackColor = false,
-            Width = 126
-        };
-        button.FlatAppearance.BorderColor = AppTheme.Border;
-        button.FlatAppearance.MouseOverBackColor = AppTheme.PrimarySoft;
-        return button;
-    }
-
-    private static Panel CreateHeading(Button summaryToggle)
-    {
-        var heading = new Panel
-        {
-            BackColor = AppTheme.WindowBackground,
-            Margin = Padding.Empty
+            Dock = DockStyle.Fill,
+            ColumnCount = 3,
+            RowCount = 1,
+            BackColor = Palette.Canvas,
+            Margin = new Padding(0, 0, 0, 14)
         };
 
-        var title = new Label
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+
+        var hero = new Card
         {
-            AutoSize = true,
-            Font = AppTheme.TitleFont,
-            ForeColor = AppTheme.TextPrimary,
-            Location = Point.Empty,
-            Text = "Dashboard"
+            Dock = DockStyle.Fill,
+            Radius = 18,
+            ShowBorder = false,
+            Margin = new Padding(0, 0, 14, 0),
+            Padding = new Padding(24, 20, 24, 18)
         };
 
-        var subtitle = new Label
+        hero.Fill(Palette.Ink);
+
+        var heroLayout = new TableLayoutPanel
         {
-            AutoSize = true,
-            Font = AppTheme.SubtitleFont,
-            ForeColor = AppTheme.TextSecondary,
-            Location = new Point(2, 38),
-            Text = "Resumen de próximos movimientos y actividad reciente"
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 3,
+            BackColor = Palette.Ink,
+            Margin = new Padding(0)
         };
 
-        var demoBadge = new Label
+        heroLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        heroLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        heroLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        var balanceCaption = Ui.Caption("SALDO ACTUAL");
+        balanceCaption.ForeColor = Color.FromArgb(150, 162, 172);
+
+        _balance.Text = "S/ 0.00";
+        _balanceHint.Text = "—";
+
+        heroLayout.Controls.Add(balanceCaption, 0, 0);
+        heroLayout.Controls.Add(_balance, 0, 1);
+        heroLayout.Controls.Add(_balanceHint, 0, 2);
+        hero.Controls.Add(heroLayout);
+
+        var projected = new Card
         {
-            Anchor = AnchorStyles.Top | AnchorStyles.Right,
-            AutoSize = false,
-            BackColor = AppTheme.PrimarySoft,
-            Font = AppTheme.CaptionBoldFont,
-            ForeColor = AppTheme.Primary,
-            Height = 25,
-            Text = "DATOS DE DEMOSTRACIÓN",
-            TextAlign = ContentAlignment.MiddleCenter,
-            Top = 5,
-            Width = 190
+            Dock = DockStyle.Fill,
+            Radius = 18,
+            ShowBorder = false,
+            Margin = new Padding(0, 0, 14, 0),
+            Padding = new Padding(20, 18, 20, 16)
         };
-        summaryToggle.Top = 1;
-        heading.Resize += (_, _) =>
+
+        projected.Fill(Palette.PrimarySoft);
+
+        var projectedLayout = new TableLayoutPanel
         {
-            summaryToggle.Left = heading.ClientSize.Width - summaryToggle.Width;
-            demoBadge.Left = summaryToggle.Left - demoBadge.Width - 12;
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 3,
+            BackColor = Palette.PrimarySoft,
+            Margin = new Padding(0)
         };
 
-        heading.Controls.Add(title);
-        heading.Controls.Add(subtitle);
-        heading.Controls.Add(demoBadge);
-        heading.Controls.Add(summaryToggle);
-        return heading;
-    }
+        projectedLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        projectedLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        projectedLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
-    private static DashboardCard CreateUpcomingChargesCard()
-    {
-        var card = new DashboardCard("Próximos cargos", DashboardIcon.Calendar);
-        card.AddItem(CreateUpcomingChargeRow(
-            DashboardIcon.Play,
-            "StreamWave",
-            "28 oct 2026",
-            "$12.99",
-            "Programado",
-            AppTheme.Primary));
-        card.AddItem(CreateUpcomingChargeRow(
-            DashboardIcon.Cloud,
-            "CloudBox Pro",
-            "02 nov 2026",
-            "$8.50",
-            "Próximo",
-            AppTheme.Warning));
-        card.AddItem(CreateUpcomingChargeRow(
-            DashboardIcon.Music,
-            "MusicFlow",
-            "06 nov 2026",
-            "$6.99",
-            "Programado",
-            AppTheme.Primary));
-        return card;
-    }
+        var projectedCaption = Ui.Caption("AHORRO PROYECTADO");
+        projectedCaption.ForeColor = Palette.PrimaryDeep;
 
-    private static DashboardCard CreateRecentActivityCard()
-    {
-        var card = new DashboardCard("Actividad reciente", DashboardIcon.Activity);
-        card.AddItem(CreateActivityRow(
-            DashboardIcon.Check,
-            "Pago registrado",
-            "StreamWave · Demostración",
-            "20 oct 2026",
-            "− $12.99",
-            AppTheme.TextPrimary));
-        card.AddItem(CreateActivityRow(
-            DashboardIcon.ArrowUp,
-            "Ingreso registrado",
-            "Ingreso mensual · Demostración",
-            "18 oct 2026",
-            "+ $850.00",
-            AppTheme.Success));
-        card.AddItem(CreateActivityRow(
-            DashboardIcon.ArrowDown,
-            "Gasto registrado",
-            "Servicio de internet · Demostración",
-            "15 oct 2026",
-            "− $34.00",
-            AppTheme.TextPrimary));
-        return card;
-    }
+        _projected.Text = "S/ 0.00";
+        _projectedHint.Text = "Al cierre del mes";
 
-    private static Control CreateUpcomingChargeRow(
-        DashboardIcon icon,
-        string service,
-        string date,
-        string amount,
-        string status,
-        Color statusColor)
-    {
-        var row = CreateRowLayout();
-        row.ColumnCount = 5;
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 46F));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DateColumnWidth));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ChargeAmountColumnWidth));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, StatusColumnWidth));
+        projectedLayout.Controls.Add(projectedCaption, 0, 0);
+        projectedLayout.Controls.Add(_projected, 0, 1);
+        projectedLayout.Controls.Add(_projectedHint, 0, 2);
+        projected.Controls.Add(projectedLayout);
 
-        row.Controls.Add(new DashboardGlyph(icon), 0, 0);
-        row.Controls.Add(CreateTextStack(service, "Servicio · Demostración"), 1, 0);
-        row.Controls.Add(CreateCenteredLabel(date, AppTheme.TextSecondary, AppTheme.CaptionFont), 2, 0);
-        row.Controls.Add(CreatePrimaryAlignedLabel(amount, AppTheme.TextPrimary), 3, 0);
-        row.Controls.Add(CreateStatusLabel(status, statusColor), 4, 0);
+        var activeCard = new Card
+        {
+            Dock = DockStyle.Fill,
+            Radius = 18,
+            Margin = new Padding(0),
+            Padding = new Padding(20, 18, 20, 16)
+        };
+
+        var activeLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 3,
+            BackColor = Palette.Surface,
+            Margin = new Padding(0)
+        };
+
+        activeLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        activeLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        activeLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        _active.Text = "0";
+        _activeHint.Text = "suscripciones activas";
+
+        activeLayout.Controls.Add(Ui.Caption("SUSCRIPCIONES"), 0, 0);
+        activeLayout.Controls.Add(_active, 0, 1);
+        activeLayout.Controls.Add(_activeHint, 0, 2);
+        activeCard.Controls.Add(activeLayout);
+
+        row.Controls.Add(hero, 0, 0);
+        row.Controls.Add(projected, 1, 0);
+        row.Controls.Add(activeCard, 2, 0);
+
         return row;
     }
 
-    private static Control CreateActivityRow(
-        DashboardIcon icon,
-        string movement,
-        string description,
-        string date,
-        string amount,
-        Color amountColor)
+    private Control BuildKpis()
     {
-        var row = CreateRowLayout();
-        row.ColumnCount = 4;
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 46F));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DateColumnWidth));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ActivityAmountColumnWidth));
+        var row = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 4,
+            RowCount = 1,
+            BackColor = Palette.Canvas,
+            Margin = new Padding(0, 0, 0, 14)
+        };
 
-        row.Controls.Add(new DashboardGlyph(icon), 0, 0);
-        row.Controls.Add(CreateTextStack(movement, description), 1, 0);
-        row.Controls.Add(CreateCenteredLabel(date, AppTheme.TextSecondary, AppTheme.CaptionFont), 2, 0);
-        row.Controls.Add(CreatePrimaryAlignedLabel(amount, amountColor), 3, 0);
+        for (var index = 0; index < 4; index++)
+        {
+            row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+        }
+
+        var income = Kpi("INGRESOS CONFIRMADOS", _income, "del mes");
+        var expenses = Kpi("GASTOS CONFIRMADOS", _expenses, "del mes");
+        var payments = Kpi("PAGOS DE SUSCRIPCIÓN", _payments, "cobros pagados");
+        var total = Kpi("TOTAL EGRESOS", _total, "gastos + suscripciones");
+
+        income.Margin = new Padding(0, 0, 14, 0);
+        expenses.Margin = new Padding(0, 0, 14, 0);
+        payments.Margin = new Padding(0, 0, 14, 0);
+
+        row.Controls.Add(income, 0, 0);
+        row.Controls.Add(expenses, 1, 0);
+        row.Controls.Add(payments, 2, 0);
+        row.Controls.Add(total, 3, 0);
+
         return row;
     }
 
-    private static TableLayoutPanel CreateRowLayout() => new()
+    private Control BuildBottom()
     {
-        BackColor = AppTheme.Surface,
-        Dock = DockStyle.Fill,
-        Margin = Padding.Empty,
-        Padding = new Padding(10, 5, 10, 5),
-        RowCount = 1
-    };
-
-    private static Control CreateTextStack(string primary, string secondary)
-    {
-        var stack = new TableLayoutPanel
+        var row = new TableLayoutPanel
         {
-            BackColor = AppTheme.Surface,
             Dock = DockStyle.Fill,
-            Margin = Padding.Empty,
-            RowCount = 2
+            ColumnCount = 2,
+            RowCount = 1,
+            BackColor = Palette.Canvas,
+            Margin = new Padding(0)
         };
-        stack.RowStyles.Add(new RowStyle(SizeType.Percent, 52F));
-        stack.RowStyles.Add(new RowStyle(SizeType.Percent, 48F));
 
-        stack.Controls.Add(new Label
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 58));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 42));
+
+        var chartCard = new Card
         {
-            AutoEllipsis = true,
             Dock = DockStyle.Fill,
-            Font = AppTheme.ItemBoldFont,
-            ForeColor = AppTheme.TextPrimary,
-            Margin = Padding.Empty,
-            Text = primary,
-            TextAlign = ContentAlignment.BottomLeft
-        }, 0, 0);
-        stack.Controls.Add(new Label
+            Margin = new Padding(0, 0, 14, 0),
+            Padding = new Padding(20, 12, 20, 10)
+        };
+
+        var chartHint = Ui.Label("Ingresos vs egresos", 8.5f, Palette.Muted);
+        chartHint.TextAlign = ContentAlignment.MiddleRight;
+
+        _chart.Dock = DockStyle.Fill;
+        _chart.Margin = new Padding(0);
+
+        chartCard.Controls.Add(_chart);
+        chartCard.Controls.Add(Ui.Header("Últimos 6 meses", chartHint));
+
+        _upcoming.RowTemplate.Height = 38;
+        _upcoming.ColumnHeadersHeight = 34;
+        _overdue.RowTemplate.Height = 38;
+        _overdue.ColumnHeadersHeight = 34;
+
+        var lists = new TableLayoutPanel
         {
-            AutoEllipsis = true,
             Dock = DockStyle.Fill,
-            Font = AppTheme.CaptionFont,
-            ForeColor = AppTheme.TextSecondary,
-            Margin = Padding.Empty,
-            Text = secondary,
-            TextAlign = ContentAlignment.TopLeft
-        }, 0, 1);
-        return stack;
+            ColumnCount = 1,
+            RowCount = 2,
+            BackColor = Palette.Canvas,
+            Margin = new Padding(0)
+        };
+
+        lists.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        lists.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+
+        lists.Controls.Add(BuildList("Próximos cobros", _upcoming, _upcomingCount, true), 0, 0);
+        lists.Controls.Add(BuildList("Cobros atrasados", _overdue, _overdueCount, false), 0, 1);
+
+        row.Controls.Add(chartCard, 0, 0);
+        row.Controls.Add(lists, 1, 0);
+
+        return row;
     }
 
-    private static Label CreateCenteredLabel(string text, Color color, Font font) => new()
+    private static Control BuildList(string title, DataGridView grid, Label counter, bool gap)
     {
-        AutoEllipsis = true,
+        var card = new Card
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(18, 8, 18, 8),
+            Margin = gap ? new Padding(0, 0, 0, 14) : new Padding(0)
+        };
+
+        card.Controls.Add(grid);
+        card.Controls.Add(Ui.Header(title, counter));
+
+        return card;
+    }
+
+    private static Card Kpi(string caption, Label value, string hint)
+    {
+        var card = new Card
+        {
+            Dock = DockStyle.Fill,
+            Radius = 14,
+            Padding = new Padding(18, 12, 18, 10),
+            Margin = new Padding(0)
+        };
+
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 3,
+            BackColor = Palette.Surface,
+            Margin = new Padding(0)
+        };
+
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        layout.Controls.Add(Ui.Caption(caption), 0, 0);
+        layout.Controls.Add(value, 0, 1);
+        layout.Controls.Add(Hint(8f, Palette.Muted, hint), 0, 2);
+
+        card.Controls.Add(layout);
+
+        return card;
+    }
+
+    private static Label ValueLabel(float size, FontStyle style, Color color) => new()
+    {
+        AutoSize = false,
         Dock = DockStyle.Fill,
-        Font = font,
+        Font = Palette.Font(size, style),
         ForeColor = color,
-        Margin = Padding.Empty,
-        Text = text,
-        TextAlign = ContentAlignment.MiddleRight
+        TextAlign = ContentAlignment.MiddleLeft,
+        BackColor = Color.Transparent,
+        Margin = new Padding(0)
     };
 
-    private static Control CreatePrimaryAlignedLabel(string text, Color color)
+    private static Label Hint(float size, Color color, string text = "—") => new()
     {
-        var stack = new TableLayoutPanel
-        {
-            BackColor = AppTheme.Surface,
-            Dock = DockStyle.Fill,
-            Margin = Padding.Empty,
-            RowCount = 2
-        };
-        stack.RowStyles.Add(new RowStyle(SizeType.Percent, 52F));
-        stack.RowStyles.Add(new RowStyle(SizeType.Percent, 48F));
-        stack.Controls.Add(new Label
-        {
-            AutoEllipsis = false,
-            Dock = DockStyle.Fill,
-            Font = AppTheme.ItemBoldFont,
-            ForeColor = color,
-            Margin = Padding.Empty,
-            Text = text,
-            TextAlign = ContentAlignment.BottomRight
-        }, 0, 0);
-        return stack;
-    }
+        AutoSize = false,
+        Dock = DockStyle.Fill,
+        Font = Palette.Font(size),
+        ForeColor = color,
+        TextAlign = ContentAlignment.MiddleLeft,
+        BackColor = Color.Transparent,
+        Text = text,
+        Margin = new Padding(0)
+    };
 
-    private static Control CreateStatusLabel(string status, Color statusColor)
+    private static Label Counter(Color color) => new()
     {
-        var host = new TableLayoutPanel
-        {
-            BackColor = AppTheme.Surface,
-            Dock = DockStyle.Fill,
-            Margin = Padding.Empty,
-            RowCount = 3
-        };
-        host.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
-        host.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        host.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
-
-        var label = new Label
-        {
-            Anchor = AnchorStyles.None,
-            AutoSize = true,
-            BackColor = AppTheme.PrimarySoft,
-            Font = AppTheme.CaptionBoldFont,
-            ForeColor = statusColor,
-            Margin = Padding.Empty,
-            Padding = new Padding(7, 4, 7, 4),
-            Text = status,
-            TextAlign = ContentAlignment.MiddleCenter
-        };
-        host.Controls.Add(label, 0, 1);
-        return host;
-    }
-
-    private sealed class FinancialSummaryPanel : Panel
-    {
-        private readonly TableLayoutPanel _layout;
-
-        public FinancialSummaryPanel()
-        {
-            BackColor = AppTheme.Surface;
-            DoubleBuffered = true;
-            Margin = Padding.Empty;
-            Padding = new Padding(1);
-
-            _layout = new TableLayoutPanel
-            {
-                BackColor = AppTheme.Surface,
-                ColumnCount = 1,
-                Dock = DockStyle.Fill,
-                Margin = Padding.Empty,
-                Padding = new Padding(16, 12, 16, 14),
-                RowCount = 4
-            };
-            _layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-            _layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 70F));
-            _layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 172F));
-            _layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 204F));
-            _layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-
-            _layout.Controls.Add(CreateSummaryHeader(), 0, 0);
-            _layout.Controls.Add(CreateMetricsGrid(), 0, 1);
-            _layout.Controls.Add(new MonthlyBarChart(), 0, 2);
-            _layout.Controls.Add(new ExpenseDonutChart(), 0, 3);
-            Controls.Add(_layout);
-        }
-
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            base.OnPaint(e);
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            Rectangle bounds = ClientRectangle;
-            bounds.Width--;
-            bounds.Height--;
-            using GraphicsPath path = CreateRoundedPath(bounds, 14);
-            using var pen = new Pen(AppTheme.Border);
-            e.Graphics.DrawPath(pen, path);
-        }
-
-        protected override void OnResize(EventArgs eventargs)
-        {
-            base.OnResize(eventargs);
-            Rectangle bounds = ClientRectangle;
-            bounds.Width--;
-            bounds.Height--;
-            using GraphicsPath path = CreateRoundedPath(bounds, 14);
-            Region? previous = Region;
-            Region = new Region(path);
-            previous?.Dispose();
-        }
-
-        private static Control CreateSummaryHeader()
-        {
-            var header = new TableLayoutPanel
-            {
-                BackColor = AppTheme.Surface,
-                ColumnCount = 1,
-                Dock = DockStyle.Fill,
-                Margin = Padding.Empty,
-                RowCount = 2
-            };
-            header.RowStyles.Add(new RowStyle(SizeType.Percent, 55F));
-            header.RowStyles.Add(new RowStyle(SizeType.Percent, 45F));
-            header.Controls.Add(new Label
-            {
-                Dock = DockStyle.Fill,
-                Font = AppTheme.PanelTitleFont,
-                ForeColor = AppTheme.TextPrimary,
-                Margin = Padding.Empty,
-                Text = "Resumen mensual",
-                TextAlign = ContentAlignment.BottomLeft
-            }, 0, 0);
-            header.Controls.Add(new Label
-            {
-                Dock = DockStyle.Fill,
-                Font = AppTheme.CaptionBoldFont,
-                ForeColor = AppTheme.Primary,
-                Margin = Padding.Empty,
-                Text = "DATOS DE DEMOSTRACIÓN",
-                TextAlign = ContentAlignment.TopLeft
-            }, 0, 1);
-            return header;
-        }
-
-        private static Control CreateMetricsGrid()
-        {
-            var grid = new TableLayoutPanel
-            {
-                BackColor = AppTheme.Surface,
-                ColumnCount = 2,
-                Dock = DockStyle.Fill,
-                Margin = Padding.Empty,
-                Padding = Padding.Empty,
-                RowCount = 2
-            };
-            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
-            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
-            grid.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
-            grid.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
-            grid.Controls.Add(CreateMetric("Ingresos del mes", "$850.00", AppTheme.Success), 0, 0);
-            grid.Controls.Add(CreateMetric("Gastos del mes", "$176.48", AppTheme.TextPrimary), 1, 0);
-            grid.Controls.Add(CreateMetric("Suscripciones", "$28.48", AppTheme.Primary), 0, 1);
-            grid.Controls.Add(CreateMetric("Saldo disponible", "$673.52", AppTheme.Success), 1, 1);
-            return grid;
-        }
-
-        private static Control CreateMetric(string caption, string value, Color valueColor)
-        {
-            var metric = new TableLayoutPanel
-            {
-                BackColor = AppTheme.WindowBackground,
-                Dock = DockStyle.Fill,
-                Margin = new Padding(3),
-                Padding = new Padding(9, 5, 9, 5),
-                RowCount = 2
-            };
-            metric.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
-            metric.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
-            metric.Controls.Add(new Label
-            {
-                AutoEllipsis = true,
-                Dock = DockStyle.Fill,
-                Font = AppTheme.CaptionFont,
-                ForeColor = AppTheme.TextSecondary,
-                Margin = Padding.Empty,
-                Text = caption,
-                TextAlign = ContentAlignment.BottomLeft
-            }, 0, 0);
-            metric.Controls.Add(new Label
-            {
-                AutoEllipsis = false,
-                Dock = DockStyle.Fill,
-                Font = AppTheme.ItemBoldFont,
-                ForeColor = valueColor,
-                Margin = Padding.Empty,
-                Text = value,
-                TextAlign = ContentAlignment.TopLeft
-            }, 0, 1);
-            return metric;
-        }
-
-        private static GraphicsPath CreateRoundedPath(Rectangle bounds, int radius)
-        {
-            var path = new GraphicsPath();
-            if (bounds.Width <= 0 || bounds.Height <= 0)
-            {
-                return path;
-            }
-
-            int diameter = radius * 2;
-            var arc = new Rectangle(bounds.Left, bounds.Top, diameter, diameter);
-            path.AddArc(arc, 180, 90);
-            arc.X = bounds.Right - diameter;
-            path.AddArc(arc, 270, 90);
-            arc.Y = bounds.Bottom - diameter;
-            path.AddArc(arc, 0, 90);
-            arc.X = bounds.Left;
-            path.AddArc(arc, 90, 90);
-            path.CloseFigure();
-            return path;
-        }
-    }
-
-    private sealed class MonthlyBarChart : Control
-    {
-        public MonthlyBarChart()
-        {
-            BackColor = AppTheme.Surface;
-            Dock = DockStyle.Fill;
-            Margin = new Padding(3, 10, 3, 6);
-            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
-        }
-
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            base.OnPaint(e);
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            TextRenderer.DrawText(e.Graphics, "Gráfico mensual", AppTheme.ItemBoldFont,
-                new Point(4, 2), AppTheme.TextPrimary);
-            TextRenderer.DrawText(e.Graphics, "Valores demostrativos", AppTheme.CaptionFont,
-                new Point(4, 23), AppTheme.TextSecondary);
-
-            int chartTop = 50;
-            int chartBottom = Math.Max(chartTop + 30, Height - 31);
-            int chartHeight = chartBottom - chartTop;
-            int center = Width / 2;
-            int barWidth = Math.Max(28, Math.Min(46, Width / 6));
-            int incomeHeight = Math.Max(20, (int)(chartHeight * .82F));
-            int expenseHeight = Math.Max(12, (int)(chartHeight * .38F));
-            var incomeBar = new Rectangle(center - barWidth - 16, chartBottom - incomeHeight, barWidth, incomeHeight);
-            var expenseBar = new Rectangle(center + 16, chartBottom - expenseHeight, barWidth, expenseHeight);
-
-            using (var gridPen = new Pen(AppTheme.Border))
-            {
-                e.Graphics.DrawLine(gridPen, 8, chartBottom, Width - 8, chartBottom);
-            }
-            using (var incomeBrush = new SolidBrush(AppTheme.Primary))
-            using (var expenseBrush = new SolidBrush(AppTheme.Warning))
-            {
-                e.Graphics.FillRectangle(incomeBrush, incomeBar);
-                e.Graphics.FillRectangle(expenseBrush, expenseBar);
-            }
-
-            DrawCenteredText(e.Graphics, "$850", incomeBar.Left - 12, incomeBar.Top - 18, incomeBar.Width + 24, AppTheme.Primary);
-            DrawCenteredText(e.Graphics, "$176", expenseBar.Left - 12, expenseBar.Top - 18, expenseBar.Width + 24, AppTheme.Warning);
-            DrawCenteredText(e.Graphics, "Ingresos", incomeBar.Left - 20, chartBottom + 4, incomeBar.Width + 40, AppTheme.TextSecondary);
-            DrawCenteredText(e.Graphics, "Gastos", expenseBar.Left - 20, chartBottom + 4, expenseBar.Width + 40, AppTheme.TextSecondary);
-        }
-
-        private static void DrawCenteredText(Graphics graphics, string text, int x, int y, int width, Color color)
-        {
-            TextRenderer.DrawText(graphics, text, AppTheme.CaptionFont, new Rectangle(x, y, width, 18), color,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
-        }
-    }
-
-    private sealed class ExpenseDonutChart : Control
-    {
-        private static readonly Color[] SegmentColors =
-        [
-            AppTheme.Primary,
-            AppTheme.Warning,
-            Color.FromArgb(116, 93, 196)
-        ];
-
-        public ExpenseDonutChart()
-        {
-            BackColor = AppTheme.Surface;
-            Dock = DockStyle.Fill;
-            Margin = new Padding(3, 8, 3, 3);
-            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
-        }
-
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            base.OnPaint(e);
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            TextRenderer.DrawText(e.Graphics, "Distribución de gastos", AppTheme.ItemBoldFont,
-                new Point(4, 2), AppTheme.TextPrimary);
-            TextRenderer.DrawText(e.Graphics, "Categorías demostrativas", AppTheme.CaptionFont,
-                new Point(4, 23), AppTheme.TextSecondary);
-
-            int donutSize = Math.Max(76, Math.Min(112, Math.Min(Height - 58, Width / 2)));
-            var donutBounds = new Rectangle(8, 50, donutSize, donutSize);
-            float startAngle = -90F;
-            float[] sweeps = [162F, 126F, 72F];
-            for (int index = 0; index < sweeps.Length; index++)
-            {
-                using var brush = new SolidBrush(SegmentColors[index]);
-                e.Graphics.FillPie(brush, donutBounds, startAngle, sweeps[index]);
-                startAngle += sweeps[index];
-            }
-
-            Rectangle inner = Rectangle.Inflate(donutBounds, -donutSize / 4, -donutSize / 4);
-            using (var centerBrush = new SolidBrush(AppTheme.Surface))
-            {
-                e.Graphics.FillEllipse(centerBrush, inner);
-            }
-
-            string[] labels = ["Servicios 45%", "Hogar 35%", "Otros 20%"];
-            int legendX = donutBounds.Right + 14;
-            int legendY = donutBounds.Top + 7;
-            for (int index = 0; index < labels.Length; index++)
-            {
-                using var brush = new SolidBrush(SegmentColors[index]);
-                e.Graphics.FillEllipse(brush, legendX, legendY + (index * 29) + 4, 10, 10);
-                TextRenderer.DrawText(e.Graphics, labels[index], AppTheme.CaptionFont,
-                    new Point(legendX + 16, legendY + (index * 29)), AppTheme.TextSecondary);
-            }
-        }
-    }
-
-    private enum DashboardIcon
-    {
-        Calendar,
-        Activity,
-        Play,
-        Cloud,
-        Music,
-        Check,
-        ArrowUp,
-        ArrowDown
-    }
-
-    private sealed class DashboardCard : Panel
-    {
-        private readonly TableLayoutPanel _layout;
-        private int _nextRow = 1;
-
-        public DashboardCard(string title, DashboardIcon icon)
-        {
-            BackColor = AppTheme.Surface;
-            DoubleBuffered = true;
-            Margin = Padding.Empty;
-            Padding = new Padding(1);
-
-            _layout = new TableLayoutPanel
-            {
-                BackColor = AppTheme.Surface,
-                ColumnCount = 1,
-                Dock = DockStyle.Fill,
-                Margin = Padding.Empty,
-                Padding = Padding.Empty,
-                RowCount = 4
-            };
-            _layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-            _layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 66F));
-            _layout.RowStyles.Add(new RowStyle(SizeType.Percent, 33.333F));
-            _layout.RowStyles.Add(new RowStyle(SizeType.Percent, 33.333F));
-            _layout.RowStyles.Add(new RowStyle(SizeType.Percent, 33.334F));
-
-            var header = new Panel
-            {
-                BackColor = AppTheme.Surface,
-                Dock = DockStyle.Fill,
-                Margin = Padding.Empty,
-                Padding = new Padding(18, 13, 18, 9)
-            };
-            var glyph = new DashboardGlyph(icon)
-            {
-                Dock = DockStyle.Left,
-                Margin = Padding.Empty,
-                Width = 38
-            };
-            var label = new Label
-            {
-                Dock = DockStyle.Fill,
-                Font = AppTheme.PanelTitleFont,
-                ForeColor = AppTheme.TextPrimary,
-                Margin = Padding.Empty,
-                Padding = new Padding(8, 0, 0, 0),
-                Text = title,
-                TextAlign = ContentAlignment.MiddleLeft
-            };
-            header.Controls.Add(label);
-            header.Controls.Add(glyph);
-            _layout.Controls.Add(header, 0, 0);
-            Controls.Add(_layout);
-        }
-
-        public void AddItem(Control item)
-        {
-            item.Margin = new Padding(0, 1, 0, 0);
-            _layout.Controls.Add(item, 0, _nextRow++);
-        }
-
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            base.OnPaint(e);
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            Rectangle bounds = ClientRectangle;
-            bounds.Width--;
-            bounds.Height--;
-            using GraphicsPath path = CreateRoundedPath(bounds, 14);
-            using var pen = new Pen(AppTheme.Border);
-            e.Graphics.DrawPath(pen, path);
-        }
-
-        protected override void OnResize(EventArgs eventargs)
-        {
-            base.OnResize(eventargs);
-            Rectangle bounds = ClientRectangle;
-            bounds.Width--;
-            bounds.Height--;
-            using GraphicsPath path = CreateRoundedPath(bounds, 14);
-            Region? previous = Region;
-            Region = new Region(path);
-            previous?.Dispose();
-        }
-
-        private static GraphicsPath CreateRoundedPath(Rectangle bounds, int radius)
-        {
-            var path = new GraphicsPath();
-            if (bounds.Width <= 0 || bounds.Height <= 0)
-            {
-                return path;
-            }
-
-            int diameter = radius * 2;
-            var arc = new Rectangle(bounds.Left, bounds.Top, diameter, diameter);
-            path.AddArc(arc, 180, 90);
-            arc.X = bounds.Right - diameter;
-            path.AddArc(arc, 270, 90);
-            arc.Y = bounds.Bottom - diameter;
-            path.AddArc(arc, 0, 90);
-            arc.X = bounds.Left;
-            path.AddArc(arc, 90, 90);
-            path.CloseFigure();
-            return path;
-        }
-    }
-
-    private sealed class DashboardGlyph : Control
-    {
-        private readonly DashboardIcon _icon;
-
-        public DashboardGlyph(DashboardIcon icon)
-        {
-            _icon = icon;
-            BackColor = AppTheme.Surface;
-            Dock = DockStyle.Fill;
-            Margin = Padding.Empty;
-            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
-        }
-
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            base.OnPaint(e);
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            float size = Math.Min(22F, Math.Min(Width - 8F, Height - 8F));
-            if (size <= 4)
-            {
-                return;
-            }
-
-            var bounds = new RectangleF((Width - size) / 2F, (Height - size) / 2F, size, size);
-            using var softBrush = new SolidBrush(AppTheme.PrimarySoft);
-            e.Graphics.FillEllipse(softBrush, bounds);
-
-            RectangleF icon = RectangleF.Inflate(bounds, -5F, -5F);
-            using var pen = new Pen(AppTheme.Primary, 1.6F)
-            {
-                StartCap = LineCap.Round,
-                EndCap = LineCap.Round,
-                LineJoin = LineJoin.Round
-            };
-            DrawGlyph(e.Graphics, pen, icon);
-        }
-
-        private void DrawGlyph(Graphics graphics, Pen pen, RectangleF bounds)
-        {
-            float cx = bounds.Left + bounds.Width / 2F;
-            float cy = bounds.Top + bounds.Height / 2F;
-            switch (_icon)
-            {
-                case DashboardIcon.Calendar:
-                    graphics.DrawRectangle(pen, bounds.X, bounds.Y + 1, bounds.Width, bounds.Height - 1);
-                    graphics.DrawLine(pen, bounds.Left, bounds.Top + 4, bounds.Right, bounds.Top + 4);
-                    break;
-                case DashboardIcon.Activity:
-                    graphics.DrawLines(pen, [
-                        new PointF(bounds.Left, cy),
-                        new PointF(cx - 3, cy),
-                        new PointF(cx, bounds.Top),
-                        new PointF(cx + 3, bounds.Bottom),
-                        new PointF(bounds.Right, cy)]);
-                    break;
-                case DashboardIcon.Play:
-                    graphics.DrawPolygon(pen, [
-                        new PointF(bounds.Left + 2, bounds.Top),
-                        new PointF(bounds.Right, cy),
-                        new PointF(bounds.Left + 2, bounds.Bottom)]);
-                    break;
-                case DashboardIcon.Cloud:
-                    graphics.DrawArc(pen, bounds.Left, cy - 2, bounds.Width * .55F, bounds.Height * .65F, 150, 210);
-                    graphics.DrawArc(pen, cx - 2, bounds.Top, bounds.Width * .6F, bounds.Height * .8F, 190, 210);
-                    graphics.DrawLine(pen, bounds.Left + 2, bounds.Bottom, bounds.Right - 1, bounds.Bottom);
-                    break;
-                case DashboardIcon.Music:
-                    graphics.DrawLine(pen, cx, bounds.Top, cx, bounds.Bottom - 2);
-                    graphics.DrawLine(pen, cx, bounds.Top, bounds.Right, bounds.Top + 2);
-                    graphics.DrawEllipse(pen, bounds.Left, bounds.Bottom - 4, 5, 4);
-                    break;
-                case DashboardIcon.Check:
-                    graphics.DrawEllipse(pen, bounds);
-                    graphics.DrawLines(pen, [
-                        new PointF(bounds.Left + 2, cy),
-                        new PointF(cx - 1, bounds.Bottom - 2),
-                        new PointF(bounds.Right - 1, bounds.Top + 2)]);
-                    break;
-                case DashboardIcon.ArrowUp:
-                    graphics.DrawLine(pen, cx, bounds.Bottom, cx, bounds.Top);
-                    graphics.DrawLine(pen, cx, bounds.Top, bounds.Left + 1, cy - 1);
-                    graphics.DrawLine(pen, cx, bounds.Top, bounds.Right - 1, cy - 1);
-                    break;
-                case DashboardIcon.ArrowDown:
-                    graphics.DrawLine(pen, cx, bounds.Top, cx, bounds.Bottom);
-                    graphics.DrawLine(pen, cx, bounds.Bottom, bounds.Left + 1, cy + 1);
-                    graphics.DrawLine(pen, cx, bounds.Bottom, bounds.Right - 1, cy + 1);
-                    break;
-            }
-        }
-    }
+        AutoSize = false,
+        Dock = DockStyle.Fill,
+        Font = Palette.Font(8.5f, FontStyle.Bold),
+        ForeColor = color,
+        TextAlign = ContentAlignment.MiddleRight,
+        BackColor = Color.Transparent,
+        Margin = new Padding(0)
+    };
 }
