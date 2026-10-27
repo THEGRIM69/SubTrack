@@ -70,10 +70,29 @@ internal static class ChargeScheduling
                 continue;
             }
 
+            var anchorStartDate = version.EffectiveFrom;
+            if (index > 0 && version.Frequency == versions[index - 1].Frequency)
+            {
+                var seriesStart = version.EffectiveFrom;
+                for (var i = index - 1; i >= 0; i--)
+                {
+                    if (versions[i].Frequency == version.Frequency)
+                    {
+                        seriesStart = versions[i].EffectiveFrom;
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+
+                anchorStartDate = seriesStart;
+            }
+
             foreach (var date in ChargeSchedulePlanner.Plan(
                 start,
                 end,
-                version.EffectiveFrom,
+                anchorStartDate,
                 null,
                 version.Frequency,
                 version.AnchorDay))

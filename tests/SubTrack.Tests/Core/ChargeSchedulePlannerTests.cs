@@ -100,4 +100,48 @@ public sealed class ChargeSchedulePlannerTests
 
         Assert.Equal(new[] { 25, 26, 27, 28 }, fechas.Select(f => f.Day));
     }
+
+    [Fact]
+    public void Plan_MesesCortosConDiaAncla31_ConservaElDiaOriginal()
+    {
+        var fechas = ChargeSchedulePlanner.Plan(
+            from: new DateOnly(2027, 1, 1),
+            until: new DateOnly(2027, 6, 1),
+            startDate: new DateOnly(2027, 1, 31),
+            deactivatedOn: null,
+            frequency: BillingFrequency.Monthly,
+            anchorDay: 31);
+
+        Assert.Equal(
+            new[]
+            {
+                new DateOnly(2027, 1, 31),
+                new DateOnly(2027, 2, 28),
+                new DateOnly(2027, 3, 31),
+                new DateOnly(2027, 4, 30),
+                new DateOnly(2027, 5, 31)
+            },
+            fechas);
+    }
+
+    [Fact]
+    public void Plan_AnoBisiestoConDiaAncla31_Utiliza29DeFebrero()
+    {
+        var fechas = ChargeSchedulePlanner.Plan(
+            from: new DateOnly(2028, 1, 1),
+            until: new DateOnly(2028, 4, 1),
+            startDate: new DateOnly(2028, 1, 31),
+            deactivatedOn: null,
+            frequency: BillingFrequency.Monthly,
+            anchorDay: 31);
+
+        Assert.Equal(
+            new[]
+            {
+                new DateOnly(2028, 1, 31),
+                new DateOnly(2028, 2, 29),
+                new DateOnly(2028, 3, 31)
+            },
+            fechas);
+    }
 }

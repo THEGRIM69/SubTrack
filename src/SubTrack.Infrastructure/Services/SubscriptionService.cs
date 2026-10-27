@@ -231,7 +231,7 @@ internal sealed class SubscriptionService : ISubscriptionService
                 AmountCents = request.AmountCents,
                 AmountType = request.AmountType,
                 Frequency = request.Frequency,
-                AnchorDay = request.EffectiveFrom.Day,
+                AnchorDay = lastVersion?.AnchorDay ?? subscription.AnchorDay,
                 CreatedAt = now
             };
 

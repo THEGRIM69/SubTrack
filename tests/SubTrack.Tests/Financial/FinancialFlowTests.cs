@@ -405,6 +405,100 @@ public sealed class FinancialFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task ModificarSuscripcion_ConFechaEfectivaDistinta_ConservaAnchorDayYVencimientosF0T31()
+    {
+        var services = await CreateServicesAsync(new DateOnly(2027, 1, 31));
+        var subscription = await CreateSubscriptionAsync(
+            services,
+            new CreateSubscriptionRequest(
+                "Suscripcion 31",
+                10_000,
+                AmountType.Fixed,
+                BillingFrequency.Monthly,
+                new DateOnly(2027, 1, 31),
+                Guid.NewGuid()));
+
+        Assert.Equal(31, subscription.AnchorDay);
+
+        // Generar cobros hasta junio 2027
+        await GenerateAsync(services, subscription.Id, new DateOnly(2027, 6, 30));
+
+        // Registrar pago del cobro inicial de enero
+        var firstCharge = await GetSingleChargeAsync(services, new DateOnly(2027, 1, 31), subscription.Id);
+        var paymentResult = await services.Payments.RegisterAsync(
+            new RegisterPaymentRequest(firstCharge.Id, new DateOnly(2027, 1, 31), Guid.NewGuid()));
+        Assert.True(paymentResult.IsSuccess, Describe(paymentResult));
+
+        // Modificar importe con entrada en vigor el 15 de abril de 2027
+        var updated = await services.Subscriptions.UpdateAsync(
+            new UpdateSubscriptionRequest(
+                subscription.Id,
+                "Suscripcion 31 Actualizada",
+                15_000,
+                AmountType.Fixed,
+                BillingFrequency.Monthly,
+                new DateOnly(2027, 4, 15)));
+
+        Assert.True(updated.IsSuccess, Describe(updated));
+        Assert.Equal(31, updated.Value.AnchorDay);
+        Assert.Equal(15_000, updated.Value.AmountCents);
+
+        var versions = await services.Subscriptions.GetVersionsAsync(subscription.Id);
+        Assert.True(versions.IsSuccess, Describe(versions));
+        Assert.Equal(2, versions.Value.Count);
+        Assert.Equal(31, versions.Value[0].AnchorDay);
+        Assert.Equal(31, versions.Value[1].AnchorDay);
+        Assert.Equal(new DateOnly(2027, 4, 15), versions.Value[1].EffectiveFrom);
+
+        var chargesResult = await services.Charges.GetByRangeAsync(
+            new DateOnly(2027, 1, 1),
+            new DateOnly(2027, 6, 30));
+
+        Assert.True(chargesResult.IsSuccess, Describe(chargesResult));
+        var charges = chargesResult.Value
+            .Where(c => c.SubscriptionId == subscription.Id)
+            .OrderBy(c => c.ScheduledDate)
+            .ToList();
+
+        // No debe existir cobro administrativo el 15 de abril
+        Assert.DoesNotContain(charges, c => c.ScheduledDate == new DateOnly(2027, 4, 15));
+
+        // Deben existir exactamente 6 cobros con las fechas F0-T31
+        var expectedDates = new[]
+        {
+            new DateOnly(2027, 1, 31),
+            new DateOnly(2027, 2, 28),
+            new DateOnly(2027, 3, 31),
+            new DateOnly(2027, 4, 30),
+            new DateOnly(2027, 5, 31),
+            new DateOnly(2027, 6, 30)
+        };
+
+        Assert.Equal(expectedDates, charges.Select(c => c.ScheduledDate).ToArray());
+
+        // Cobro historico pagado intacto
+        Assert.Equal(ScheduledChargeStatus.Paid, charges[0].Status);
+        Assert.Equal(10_000, charges[0].AmountCents);
+
+        // Cobros anteriores al 15 de abril con importe original
+        Assert.Equal(ScheduledChargeStatus.Pending, charges[1].Status);
+        Assert.Equal(10_000, charges[1].AmountCents);
+
+        Assert.Equal(ScheduledChargeStatus.Pending, charges[2].Status);
+        Assert.Equal(10_000, charges[2].AmountCents);
+
+        // Cobros posteriores al 15 de abril con nuevo importe
+        Assert.Equal(ScheduledChargeStatus.Pending, charges[3].Status);
+        Assert.Equal(15_000, charges[3].AmountCents);
+
+        Assert.Equal(ScheduledChargeStatus.Pending, charges[4].Status);
+        Assert.Equal(15_000, charges[4].AmountCents);
+
+        Assert.Equal(ScheduledChargeStatus.Pending, charges[5].Status);
+        Assert.Equal(15_000, charges[5].AmountCents);
+    }
+
+    [Fact]
     public async Task ModificarSuscripcion_ConFechaAnteriorAUltimaVersion_SeRechaza()
     {
         var services = await CreateServicesAsync();
