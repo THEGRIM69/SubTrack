@@ -354,6 +354,13 @@ internal sealed class SubscriptionService : ISubscriptionService
                     "La suscripción ya estaba desactivada.");
             }
 
+            await _charges.DeleteFuturePendingWithoutPaymentsAsync(
+                connection,
+                transaction,
+                subscription.Id,
+                request.EffectiveFrom,
+                cancellationToken).ConfigureAwait(false);
+
             var next = await _charges.GetMinPendingDateAsync(
                 connection,
                 transaction,
