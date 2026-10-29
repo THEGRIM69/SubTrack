@@ -12,7 +12,7 @@ internal static class Format
 
     public static string Money(long cents) => (cents / 100m).ToString("N2");
 
-    public static string Currency(long cents) => $"S/ {Money(cents)}";
+    public static string Currency(long cents) => $"$ {Money(cents)}";
 
     public static string Month(DateOnly value) => Capitalize(value.ToString("MMMM yyyy", Spanish));
 

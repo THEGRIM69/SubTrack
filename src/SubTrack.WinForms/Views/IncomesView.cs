@@ -373,7 +373,7 @@ internal sealed class IncomesView : ViewBase
         while (true)
         {
             var request = new IncomeHistoryRequest(
-                new PageRequest(_page, 25),
+                new PageRequest(_page, 50),
                 _useRange.Checked ? DateOnly.FromDateTime(_from.Value) : null,
                 _useRange.Checked ? DateOnly.FromDateTime(_to.Value) : null,
                 SelectedStatus());
@@ -543,7 +543,7 @@ internal sealed class IncomesView : ViewBase
         }
 
         Notify($"Ingreso registrado: {result.Value.Concept}.");
-        await RefreshAsync();
+        await DataChangedAsync(DataChangeKind.Incomes);
     }
 
     private async Task EditAsync()
@@ -585,7 +585,7 @@ internal sealed class IncomesView : ViewBase
         }
 
         Notify("Ingreso actualizado.");
-        await RefreshAsync();
+        await DataChangedAsync(DataChangeKind.Incomes);
     }
 
     private async Task ConfirmAsync()
@@ -622,7 +622,7 @@ internal sealed class IncomesView : ViewBase
         }
 
         Notify("Ingreso confirmado.");
-        await RefreshAsync();
+        await DataChangedAsync(DataChangeKind.Incomes);
     }
 
     private async Task CancelAsync()
@@ -666,7 +666,7 @@ internal sealed class IncomesView : ViewBase
         }
 
         Notify("Ingreso anulado.");
-        await RefreshAsync();
+        await DataChangedAsync(DataChangeKind.Incomes);
     }
 
     private async Task CorrectionsAsync()
@@ -748,7 +748,7 @@ internal sealed class IncomesView : ViewBase
         }
 
         Notify($"Plantilla creada: {result.Value.Concept}.");
-        await RefreshAsync();
+        await DataChangedAsync(DataChangeKind.Incomes);
     }
 
     private async Task GenerateTemplateAsync()
@@ -792,7 +792,7 @@ internal sealed class IncomesView : ViewBase
             ? "No había ingresos nuevos por generar."
             : $"{result.Value.Count} ingresos previstos generados.");
 
-        await RefreshAsync();
+        await DataChangedAsync(DataChangeKind.Incomes);
     }
 
     private Income? Selected()

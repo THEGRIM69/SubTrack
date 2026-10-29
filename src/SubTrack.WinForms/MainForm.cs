@@ -29,6 +29,7 @@ public sealed class MainForm : Form
     private readonly Dictionary<string, (int Index, Func<ViewContext, Control> Factory)> _navigation = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Control> _views = new(StringComparer.OrdinalIgnoreCase);
     private string? _currentSection;
+    private bool _refreshingChanges;
 
     public MainForm(SubTrackServices services, SubTrackDatabaseOptions options)
     {
@@ -184,6 +185,40 @@ public sealed class MainForm : Form
         return base.ProcessCmdKey(ref message, keyData);
     }
 
+    private int _activeOperations;
+
+    public IDisposable BeginOperation()
+    {
+        Interlocked.Increment(ref _activeOperations);
+        return new OperationScope(() => Interlocked.Decrement(ref _activeOperations));
+    }
+
+    private sealed class OperationScope(Action onDispose) : IDisposable
+    {
+        private Action? _onDispose = onDispose;
+        public void Dispose() => Interlocked.Exchange(ref _onDispose, null)?.Invoke();
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        if (Volatile.Read(ref _activeOperations) > 0)
+        {
+            var result = MessageBox.Show(
+                "Hay una operación en curso. ¿Deseas esperar a que finalice antes de salir?",
+                "SubTrack — Operación en proceso",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+
+            if (result == DialogResult.Yes)
+            {
+                e.Cancel = true;
+                return;
+            }
+        }
+
+        base.OnFormClosing(e);
+    }
+
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
         _toastTimer.Dispose();
@@ -222,7 +257,7 @@ public sealed class MainForm : Form
 
         if (!_views.TryGetValue(section, out var view))
         {
-            var context = new ViewContext(_services, _options, Notify);
+            var context = new ViewContext(_services, _options, Notify, BeginOperation, RefreshAffectedAsync);
             view = entry.Factory(context);
             view.Dock = DockStyle.Fill;
             _views[section] = view;
@@ -240,6 +275,47 @@ public sealed class MainForm : Form
             _subtitle.Text = appView.Subtitle;
 
             await appView.RefreshAsync();
+        }
+    }
+
+    private async Task RefreshAffectedAsync(DataChangeKind change)
+    {
+        if (_refreshingChanges || change == DataChangeKind.None)
+        {
+            return;
+        }
+
+        _refreshingChanges = true;
+        try
+        {
+            foreach (var pair in _views)
+            {
+                var shouldRefresh = pair.Key switch
+                {
+                    "Dashboard" => change.HasFlag(DataChangeKind.Subscriptions)
+                        || change.HasFlag(DataChangeKind.Charges)
+                        || change.HasFlag(DataChangeKind.Payments)
+                        || change.HasFlag(DataChangeKind.Expenses)
+                        || change.HasFlag(DataChangeKind.Incomes)
+                        || change.HasFlag(DataChangeKind.OpeningBalance),
+                    "Suscripciones" => change.HasFlag(DataChangeKind.Subscriptions),
+                    "Cobros" => change.HasFlag(DataChangeKind.Charges) || change.HasFlag(DataChangeKind.Subscriptions),
+                    "Pagos" => change.HasFlag(DataChangeKind.Payments),
+                    "Gastos" => change.HasFlag(DataChangeKind.Expenses),
+                    "Ingresos" => change.HasFlag(DataChangeKind.Incomes),
+                    "Configuración" => change.HasFlag(DataChangeKind.Categories) || change.HasFlag(DataChangeKind.OpeningBalance),
+                    _ => false
+                };
+
+                if (shouldRefresh && pair.Value is IAppView view)
+                {
+                    await view.RefreshAsync();
+                }
+            }
+        }
+        finally
+        {
+            _refreshingChanges = false;
         }
     }
 

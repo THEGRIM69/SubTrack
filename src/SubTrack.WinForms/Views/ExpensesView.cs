@@ -231,7 +231,7 @@ internal sealed class ExpensesView : ViewBase
         while (true)
         {
             var request = new ExpenseHistoryRequest(
-                new PageRequest(_page, 25),
+                new PageRequest(_page, 50),
                 _useRange.Checked ? DateOnly.FromDateTime(_from.Value) : null,
                 _useRange.Checked ? DateOnly.FromDateTime(_to.Value) : null,
                 SelectedCategory(),
@@ -392,7 +392,7 @@ internal sealed class ExpensesView : ViewBase
         }
 
         Notify($"Gasto registrado: {result.Value.Concept}.");
-        await RefreshAsync();
+        await DataChangedAsync(DataChangeKind.Expenses);
     }
 
     private async Task EditAsync()
@@ -455,7 +455,7 @@ internal sealed class ExpensesView : ViewBase
         }
 
         Notify("Gasto actualizado.");
-        await RefreshAsync();
+        await DataChangedAsync(DataChangeKind.Expenses);
     }
 
     private async Task ConfirmAsync()
@@ -492,7 +492,7 @@ internal sealed class ExpensesView : ViewBase
         }
 
         Notify("Gasto confirmado.");
-        await RefreshAsync();
+        await DataChangedAsync(DataChangeKind.Expenses);
     }
 
     private async Task CancelAsync()
@@ -536,7 +536,7 @@ internal sealed class ExpensesView : ViewBase
         }
 
         Notify("Gasto anulado.");
-        await RefreshAsync();
+        await DataChangedAsync(DataChangeKind.Expenses);
     }
 
     private async Task CorrectionsAsync()

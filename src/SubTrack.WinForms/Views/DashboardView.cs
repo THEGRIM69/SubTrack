@@ -207,7 +207,7 @@ internal sealed class DashboardView : ViewBase
             Notify(created == 0 ? "No había cobros nuevos por generar." : $"{created} cobros generados.");
         }
 
-        await RefreshAsync();
+        await DataChangedAsync(DataChangeKind.Charges);
     }
 
     private void Fill(DataGridView grid, IReadOnlyList<ScheduledCharge> charges)
@@ -269,7 +269,7 @@ internal sealed class DashboardView : ViewBase
         var balanceCaption = Ui.Caption("SALDO ACTUAL");
         balanceCaption.ForeColor = Color.FromArgb(150, 162, 172);
 
-        _balance.Text = "S/ 0.00";
+        _balance.Text = "$ 0.00";
         _balanceHint.Text = "—";
 
         heroLayout.Controls.Add(balanceCaption, 0, 0);
@@ -304,7 +304,7 @@ internal sealed class DashboardView : ViewBase
         var projectedCaption = Ui.Caption("AHORRO PROYECTADO");
         projectedCaption.ForeColor = Palette.PrimaryDeep;
 
-        _projected.Text = "S/ 0.00";
+        _projected.Text = "$ 0.00";
         _projectedHint.Text = "Al cierre del mes";
 
         projectedLayout.Controls.Add(projectedCaption, 0, 0);

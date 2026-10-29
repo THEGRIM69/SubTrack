@@ -14,10 +14,26 @@ internal interface IAppView
     Task RefreshAsync();
 }
 
+[Flags]
+internal enum DataChangeKind
+{
+    None = 0,
+    Subscriptions = 1,
+    Charges = 2,
+    Payments = 4,
+    Expenses = 8,
+    Incomes = 16,
+    Categories = 32,
+    OpeningBalance = 64,
+    Dashboard = 128
+}
+
 internal sealed record ViewContext(
     SubTrackServices Services,
     SubTrackDatabaseOptions Options,
-    Action<string, bool> Notify);
+    Action<string, bool> Notify,
+    Func<IDisposable>? BeginOperation = null,
+    Func<DataChangeKind, Task>? DataChanged = null);
 
 /// <summary>
 /// Base de las vistas: ciclo de vida Build/Load y manejo uniforme de errores.
@@ -37,6 +53,15 @@ internal abstract class ViewBase : UserControl, IAppView
     }
 
     protected ViewContext Context { get; }
+
+    protected IDisposable BeginOperation() =>
+        Context.BeginOperation?.Invoke() ?? NullDisposable.Instance;
+
+    private sealed class NullDisposable : IDisposable
+    {
+        public static readonly NullDisposable Instance = new();
+        public void Dispose() { }
+    }
 
     public abstract string Title { get; }
 
@@ -59,6 +84,9 @@ internal abstract class ViewBase : UserControl, IAppView
     protected abstract Task LoadAsync();
 
     protected void Notify(string message, bool error = false) => Context.Notify(message, error);
+
+    protected Task DataChangedAsync(DataChangeKind change) =>
+        Context.DataChanged?.Invoke(change) ?? Task.CompletedTask;
 
     protected bool Failed(Result result)
     {

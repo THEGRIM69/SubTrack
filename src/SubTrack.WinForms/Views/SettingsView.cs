@@ -255,6 +255,7 @@ internal sealed class SettingsView : ViewBase
         };
 
         actions.Controls.Add(Ui.Compact(Ui.Action("Crear respaldo", CreateBackupAsync)));
+        actions.Controls.Add(Ui.Compact(Ui.Action("Restaurar respaldo", RestoreBackupAsync)));
         actions.Controls.Add(Ui.Compact(Ui.Action("Verificar integridad", VerifyAsync)));
         actions.Controls.Add(Ui.Compact(Ui.Action("Optimizar", OptimizeAsync)));
 
@@ -384,7 +385,7 @@ internal sealed class SettingsView : ViewBase
         }
 
         Notify($"Categoría creada: {result.Value.Name}.");
-        await RefreshAsync();
+        await DataChangedAsync(DataChangeKind.Categories);
     }
 
     private async Task RenameCategoryAsync()
@@ -411,7 +412,7 @@ internal sealed class SettingsView : ViewBase
         }
 
         Notify("Categoría renombrada.");
-        await RefreshAsync();
+        await DataChangedAsync(DataChangeKind.Categories);
     }
 
     private async Task DeactivateCategoryAsync()
@@ -440,7 +441,7 @@ internal sealed class SettingsView : ViewBase
         }
 
         Notify("Categoría desactivada.");
-        await RefreshAsync();
+        await DataChangedAsync(DataChangeKind.Categories);
     }
 
     private async Task DeleteCategoryAsync()
@@ -470,7 +471,7 @@ internal sealed class SettingsView : ViewBase
         }
 
         Notify("Categoría eliminada.");
-        await RefreshAsync();
+        await DataChangedAsync(DataChangeKind.Categories);
     }
 
     private async Task ConfigureOpeningAsync()
@@ -505,25 +506,87 @@ internal sealed class SettingsView : ViewBase
         }
 
         Notify("Saldo inicial guardado.");
-        await RefreshAsync();
+        await DataChangedAsync(DataChangeKind.OpeningBalance);
     }
 
     private async Task CreateBackupAsync()
     {
-        try
+        using (BeginOperation())
         {
-            var service = new SqliteBackupService(Context.Options);
-            var result = await service.CreateBackupAsync();
+            try
+            {
+                var service = new SqliteBackupService(Context.Options);
+                var result = await service.CreateBackupAsync();
 
-            Notify($"Respaldo creado: {Path.GetFileName(result.BackupPath)}.");
-            await LoadMaintenanceAsync();
-        }
-        catch (Exception exception)
-        {
-            Notify($"No se pudo crear el respaldo: {exception.Message}", true);
+                Notify($"Respaldo creado: {Path.GetFileName(result.BackupPath)}.");
+                await LoadMaintenanceAsync();
+            }
+            catch (Exception exception)
+            {
+                Notify($"No se pudo crear el respaldo: {exception.Message}", true);
+            }
         }
     }
 
+    private async Task RestoreBackupAsync()
+    {
+        using var dialog = new OpenFileDialog
+        {
+            Title = "Seleccionar copia de seguridad para restaurar",
+            Filter = "Base de datos SQLite (*.db)|*.db|Todos los archivos (*.*)|*.*",
+            InitialDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "SubTrack",
+                "backups")
+        };
+
+        if (dialog.ShowDialog() != DialogResult.OK)
+        {
+            return;
+        }
+
+        var confirmation = MessageBox.Show(
+            $"Esta acción reemplazará la base de datos actual con la copia seleccionada:{Environment.NewLine}{Path.GetFileName(dialog.FileName)}{Environment.NewLine}{Environment.NewLine}Se creará una copia de seguridad preventiva antes de restaurar.{Environment.NewLine}¿Deseas continuar?",
+            "Confirmar restauración de datos",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning);
+
+        if (confirmation != DialogResult.Yes)
+        {
+            return;
+        }
+
+        using (BeginOperation())
+        {
+            try
+            {
+                var service = new SqliteBackupService(Context.Options);
+                var verification = await service.VerifyBackupAsync(dialog.FileName);
+
+                if (!verification.IsValid)
+                {
+                    Notify($"El archivo no es una copia válida de SubTrack: {verification.FailureReason}", true);
+                    return;
+                }
+
+                var result = await service.RestoreBackupAsync(dialog.FileName, keepSafetyBackup: true);
+
+                Notify($"Base de datos restaurada correctamente desde {Path.GetFileName(result.SourceBackupPath)}.");
+                await DataChangedAsync(
+                    DataChangeKind.Subscriptions
+                    | DataChangeKind.Charges
+                    | DataChangeKind.Payments
+                    | DataChangeKind.Expenses
+                    | DataChangeKind.Incomes
+                    | DataChangeKind.Categories
+                    | DataChangeKind.OpeningBalance);
+            }
+            catch (Exception exception)
+            {
+                Notify($"Error al restaurar el respaldo: {exception.Message}", true);
+            }
+        }
+    }
     private async Task VerifyAsync()
     {
         try

@@ -85,6 +85,7 @@ internal class ChargesView : ViewBase
 
         pendingActions.Controls.Add(Ui.Compact(Ui.Action("Pagar", PayAsync, ButtonKind.Primary)));
         pendingActions.Controls.Add(Ui.Compact(Ui.Action("Ajustar", AdjustAsync)));
+        pendingActions.Controls.Add(Ui.Compact(Ui.Action("Generar cobros", GenerateAsync)));
         pendingActions.Controls.Add(Ui.Compact(Ui.Action("Anular cobro", CancelChargeAsync)));
 
         var pendingHeader = new TableLayoutPanel
@@ -272,7 +273,7 @@ internal class ChargesView : ViewBase
     {
         while (true)
         {
-            var result = await Context.Services.Payments.GetHistoryAsync(new PageRequest(_page, 20));
+            var result = await Context.Services.Payments.GetHistoryAsync(new PageRequest(_page, 50));
 
             if (Failed(result))
             {
@@ -344,7 +345,7 @@ internal class ChargesView : ViewBase
         }
 
         Notify($"Pago registrado · comprobante {result.Value.VoucherNumber}.");
-        await RefreshAsync();
+        await DataChangedAsync(DataChangeKind.Payments | DataChangeKind.Charges);
     }
 
     private async Task AdjustAsync()
@@ -376,7 +377,7 @@ internal class ChargesView : ViewBase
         }
 
         Notify("Importe del cobro actualizado.");
-        await RefreshAsync();
+        await DataChangedAsync(DataChangeKind.Charges);
     }
 
     private async Task CancelChargeAsync()
@@ -407,7 +408,46 @@ internal class ChargesView : ViewBase
         }
 
         Notify("Cobro anulado.");
-        await RefreshAsync();
+        await DataChangedAsync(DataChangeKind.Charges);
+    }
+
+    private async Task GenerateAsync()
+    {
+        var today = DateTime.Today;
+        var suggested = new DateTime(today.Year, today.Month, DateTime.DaysInMonth(today.Year, today.Month));
+
+        using var dialog = new FormDialog(
+            "Generar cobros",
+            "Genera los cobros pendientes de todas las suscripciones activas hasta la fecha indicada (máximo 12 meses).",
+            "Generar");
+
+        var until = dialog.AddDate("Generar hasta", suggested);
+        until.MaxDate = today.AddMonths(12);
+
+        if (dialog.ShowDialog(FindForm()) != DialogResult.OK)
+        {
+            return;
+        }
+
+        var subscriptions = await Context.Services.Subscriptions.GetAllAsync();
+        if (Failed(subscriptions))
+        {
+            return;
+        }
+
+        var created = 0;
+        var limit = DateOnly.FromDateTime(until.Value);
+        foreach (var sub in subscriptions.Value.Where(s => s.IsActive))
+        {
+            var res = await Context.Services.Charges.GenerateAsync(new GenerateChargesRequest(sub.Id, limit));
+            if (res.IsSuccess)
+            {
+                created += res.Value.Count;
+            }
+        }
+
+        Notify(created == 0 ? "No había cobros nuevos por generar." : $"{created} cobros generados.");
+        await DataChangedAsync(DataChangeKind.Charges);
     }
 
     private async Task CancelPaymentAsync()
@@ -446,6 +486,6 @@ internal class ChargesView : ViewBase
         }
 
         Notify("Pago anulado.");
-        await RefreshAsync();
+        await DataChangedAsync(DataChangeKind.Payments | DataChangeKind.Charges);
     }
 }

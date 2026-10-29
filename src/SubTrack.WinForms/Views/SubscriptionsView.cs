@@ -165,7 +165,7 @@ internal sealed class SubscriptionsView : ViewBase
     {
         using var dialog = new FormDialog(
             "Nueva suscripción",
-            "Los cobros se generan de forma explícita, nunca automáticamente.",
+            "Configura los datos de la suscripción y su primer cobro.",
             "Crear suscripción");
 
         var name = dialog.AddText("Nombre");
@@ -179,21 +179,39 @@ internal sealed class SubscriptionsView : ViewBase
             return;
         }
 
+        var startDate = DateOnly.FromDateTime(start.Value);
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var cents = Format.Cents(amount.Value);
+
+        var initialCharges = startDate < today
+            ? new[] { new InitialPendingCharge(startDate, cents) }
+            : null;
+
         var result = await Context.Services.Subscriptions.CreateAsync(new CreateSubscriptionRequest(
             name.Text.Trim(),
-            Format.Cents(amount.Value),
+            cents,
             FormDialog.Value<AmountType>(type),
             FormDialog.Value<BillingFrequency>(frequency),
-            DateOnly.FromDateTime(start.Value),
-            Guid.NewGuid()));
+            startDate,
+            Guid.NewGuid(),
+            initialCharges));
 
         if (Failed(result))
         {
             return;
         }
 
+        var endOfMonth = new DateOnly(today.Year, today.Month, DateTime.DaysInMonth(today.Year, today.Month));
+        var until = startDate > endOfMonth ? startDate : endOfMonth;
+        if (until >= today)
+        {
+            await Context.Services.Charges.GenerateAsync(new GenerateChargesRequest(
+                result.Value.Id,
+                until));
+        }
+
         Notify($"Suscripción creada: {result.Value.Name}.");
-        await RefreshAsync();
+        await DataChangedAsync(DataChangeKind.Subscriptions | DataChangeKind.Charges);
     }
 
     private async Task EditAsync()
@@ -219,10 +237,12 @@ internal sealed class SubscriptionsView : ViewBase
             return;
         }
 
+        var cents = Format.Cents(amount.Value);
+
         var result = await Context.Services.Subscriptions.UpdateAsync(new UpdateSubscriptionRequest(
             subscription.Id,
             name.Text.Trim(),
-            Format.Cents(amount.Value),
+            cents,
             FormDialog.Value<AmountType>(type),
             FormDialog.Value<BillingFrequency>(frequency),
             DateOnly.FromDateTime(effective.Value)));
@@ -233,7 +253,7 @@ internal sealed class SubscriptionsView : ViewBase
         }
 
         Notify($"Suscripción actualizada: {result.Value.Name}.");
-        await RefreshAsync();
+        await DataChangedAsync(DataChangeKind.Subscriptions | DataChangeKind.Charges);
     }
 
     private async Task DeactivateAsync()
@@ -265,7 +285,7 @@ internal sealed class SubscriptionsView : ViewBase
         }
 
         Notify($"Suscripción desactivada: {result.Value.Name}.");
-        await RefreshAsync();
+        await DataChangedAsync(DataChangeKind.Subscriptions | DataChangeKind.Charges);
     }
 
     private async Task GenerateAsync()
@@ -309,7 +329,7 @@ internal sealed class SubscriptionsView : ViewBase
             ? "No había cobros nuevos por generar."
             : $"{result.Value.Count} cobros generados para {subscription.Name}.");
 
-        await RefreshAsync();
+        await DataChangedAsync(DataChangeKind.Charges);
     }
 
     private async Task InitialChargeAsync()
@@ -344,7 +364,7 @@ internal sealed class SubscriptionsView : ViewBase
         }
 
         Notify("Cobro inicial registrado.");
-        await RefreshAsync();
+        await DataChangedAsync(DataChangeKind.Charges);
     }
 
     private async Task ShowVersionsAsync()
