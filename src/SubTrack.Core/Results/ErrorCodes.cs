@@ -25,6 +25,7 @@ public static class ErrorCodes
     public const string SuscripcionInactiva = "SUSCRIPCION_INACTIVA";
     public const string SuscripcionYaInactiva = "SUSCRIPCION_YA_INACTIVA";
     public const string FechaEfectivaAnterior = "FECHA_EFECTIVA_ANTERIOR";
+    public const string PeriodoCubiertoPorPago = "PERIODO_CUBIERTO_POR_PAGO";
 
     // Cobros programados
     public const string CobroNoEncontrado = "COBRO_NO_ENCONTRADO";

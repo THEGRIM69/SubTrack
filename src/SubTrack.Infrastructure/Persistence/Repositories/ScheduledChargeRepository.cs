@@ -17,6 +17,37 @@ internal sealed class ScheduledChargeRepository
         FROM cobros_programados
         """;
 
+    public async Task<ScheduledCharge?> GetLastPaidWithActivePaymentAsync(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        Guid subscriptionId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection
+            .CreateCommand(
+                transaction,
+                $"""
+                {SelectCharges}
+                WHERE suscripcion_id = $suscripcion
+                  AND estado = 'PAGADO'
+                  AND EXISTS (
+                      SELECT 1 FROM pagos p
+                      WHERE p.cobro_id = cobros_programados.id
+                        AND p.estado = 'VIGENTE'
+                  )
+                ORDER BY fecha_programada DESC
+                LIMIT 1;
+                """)
+            .WithParameters(("$suscripcion", subscriptionId.ToString()));
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
+            ? Map(reader)
+            : null;
+    }
+
     public async Task<ScheduledCharge?> GetByIdAsync(
         SqliteConnection connection,
         SqliteTransaction? transaction,
