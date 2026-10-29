@@ -9,6 +9,7 @@ namespace SubTrack.Infrastructure.Services;
 
 /// <summary>
 /// F0-11, F0-T12 — Reúne los insumos del Dashboard y delega el cálculo en Core.
+/// Separa importes mensuales (para tarjetas y gráficos) de importes acumulados (para saldo global).
 /// </summary>
 internal sealed class DashboardService : IDashboardService
 {
@@ -49,20 +50,39 @@ internal sealed class DashboardService : IDashboardService
         var opening = await _balances.GetAsync(connection, null, cancellationToken)
             .ConfigureAwait(false);
 
+        // F0-20, F0-21: el saldo inicial solo entra en vigor a partir de su fecha de inicio
+        var openingAmount = (opening is not null && last >= opening.StartDate)
+            ? opening.AmountCents
+            : 0L;
+
+        var monthlyIncome = await _dashboard.SumConfirmedIncomeRangeAsync(
+            connection, first, last, cancellationToken).ConfigureAwait(false);
+        var monthlyExpenses = await _dashboard.SumConfirmedExpensesRangeAsync(
+            connection, first, last, cancellationToken).ConfigureAwait(false);
+        var monthlyPayments = await _dashboard.SumConfirmedPaymentsRangeAsync(
+            connection, first, last, cancellationToken).ConfigureAwait(false);
+
+        var cumulativeIncome = await _dashboard.SumConfirmedIncomeAsync(
+            connection, last, cancellationToken).ConfigureAwait(false);
+        var cumulativeExpenses = await _dashboard.SumConfirmedExpensesAsync(
+            connection, last, cancellationToken).ConfigureAwait(false);
+        var cumulativePayments = await _dashboard.SumConfirmedPaymentsAsync(
+            connection, last, cancellationToken).ConfigureAwait(false);
+
         var inputs = new DashboardInputs(
-            OpeningBalanceCents: opening?.AmountCents ?? 0,
-            ConfirmedIncomeCents: await _dashboard.SumConfirmedIncomeAsync(
-                connection, last, cancellationToken).ConfigureAwait(false),
-            ConfirmedExpensesCents: await _dashboard.SumConfirmedExpensesAsync(
-                connection, last, cancellationToken).ConfigureAwait(false),
-            ConfirmedPaymentsCents: await _dashboard.SumConfirmedPaymentsAsync(
-                connection, last, cancellationToken).ConfigureAwait(false),
+            OpeningBalanceCents: openingAmount,
+            ConfirmedIncomeCents: monthlyIncome,
+            ConfirmedExpensesCents: monthlyExpenses,
+            ConfirmedPaymentsCents: monthlyPayments,
             PlannedIncomeCents: await _dashboard.SumPlannedIncomeAsync(
                 connection, futureFrom, last, cancellationToken).ConfigureAwait(false),
             PendingChargesCents: await _dashboard.SumPendingChargesAsync(
                 connection, futureFrom, last, cancellationToken).ConfigureAwait(false),
             PlannedExpensesCents: await _dashboard.SumPlannedExpensesAsync(
-                connection, futureFrom, last, cancellationToken).ConfigureAwait(false));
+                connection, futureFrom, last, cancellationToken).ConfigureAwait(false),
+            CumulativeIncomeCents: cumulativeIncome,
+            CumulativeExpensesCents: cumulativeExpenses,
+            CumulativePaymentsCents: cumulativePayments);
 
         var upcoming = futureFrom <= last
             ? await _charges.GetPendingInRangeAsync(connection, futureFrom, last, cancellationToken)

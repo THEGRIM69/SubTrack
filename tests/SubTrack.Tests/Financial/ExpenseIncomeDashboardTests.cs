@@ -658,6 +658,84 @@ public sealed class ExpenseIncomeDashboardTests : IDisposable
         Assert.Equal(0, dashboard.Value.CurrentBalanceCents);
     }
 
+
+    [Fact]
+    public async Task Dashboard_MesesAnterioresNoSeAcumulanEnTarjetasMensuales_YConservaSaldoHistorico()
+    {
+        var services = await CreateServicesAsync();
+
+        await services.Incomes.CreateAsync(
+            new CreateIncomeRequest(
+                "Ingreso Septiembre",
+                20_000,
+                IncomeType.Extraordinary,
+                new DateOnly(2026, 9, 15),
+                new DateOnly(2026, 9, 15),
+                null,
+                Guid.NewGuid()));
+
+        await services.Expenses.CreateAsync(
+            new CreateExpenseRequest(
+                "Gasto Septiembre",
+                Food,
+                5_000,
+                new DateOnly(2026, 9, 20),
+                new DateOnly(2026, 9, 20),
+                Guid.NewGuid()));
+
+        await services.Incomes.CreateAsync(
+            new CreateIncomeRequest(
+                "Ingreso Octubre",
+                30_000,
+                IncomeType.Extraordinary,
+                new DateOnly(2026, 10, 10),
+                new DateOnly(2026, 10, 10),
+                null,
+                Guid.NewGuid()));
+
+        await services.Expenses.CreateAsync(
+            new CreateExpenseRequest(
+                "Gasto Octubre",
+                Food,
+                4_000,
+                new DateOnly(2026, 10, 15),
+                new DateOnly(2026, 10, 15),
+                Guid.NewGuid()));
+
+        var dashboardOctubre = await services.Dashboard.GetAsync(new GetDashboardRequest(new DateOnly(2026, 10, 1)));
+        Assert.True(dashboardOctubre.IsSuccess, Describe(dashboardOctubre));
+
+        Assert.Equal(30_000, dashboardOctubre.Value.IncomeCents);
+        Assert.Equal(4_000, dashboardOctubre.Value.ExpensesCents);
+        Assert.Equal(4_000, dashboardOctubre.Value.TotalExpensesCents);
+        Assert.Equal(41_000, dashboardOctubre.Value.CurrentBalanceCents);
+
+        var dashboardSeptiembre = await services.Dashboard.GetAsync(new GetDashboardRequest(new DateOnly(2026, 9, 1)));
+        Assert.True(dashboardSeptiembre.IsSuccess, Describe(dashboardSeptiembre));
+
+        Assert.Equal(20_000, dashboardSeptiembre.Value.IncomeCents);
+        Assert.Equal(5_000, dashboardSeptiembre.Value.ExpensesCents);
+        Assert.Equal(15_000, dashboardSeptiembre.Value.CurrentBalanceCents);
+    }
+
+    [Fact]
+    public async Task Dashboard_SaldoInicial_NoSeAplicaEnMesesAnterioresASuFechaDeInicio()
+    {
+        var services = await CreateServicesAsync();
+
+        await services.OpeningBalance.SetAsync(
+            new SetOpeningBalanceRequest(50_000, new DateOnly(2026, 11, 1)));
+
+        var dashboardOctubre = await services.Dashboard.GetAsync(new GetDashboardRequest(new DateOnly(2026, 10, 1)));
+        Assert.True(dashboardOctubre.IsSuccess, Describe(dashboardOctubre));
+        Assert.Equal(0, dashboardOctubre.Value.OpeningBalanceCents);
+        Assert.Equal(0, dashboardOctubre.Value.CurrentBalanceCents);
+
+        var dashboardNoviembre = await services.Dashboard.GetAsync(new GetDashboardRequest(new DateOnly(2026, 11, 1)));
+        Assert.True(dashboardNoviembre.IsSuccess, Describe(dashboardNoviembre));
+        Assert.Equal(50_000, dashboardNoviembre.Value.OpeningBalanceCents);
+        Assert.Equal(50_000, dashboardNoviembre.Value.CurrentBalanceCents);
+    }
     private async Task<SubTrackServices> CreateServicesAsync(DateOnly? today = null)
     {
         var migration = await new SqliteDatabaseMigrator(_options).MigrateAsync();

@@ -5,7 +5,8 @@ namespace SubTrack.Core.Services;
 
 /// <summary>
 /// F0-11, F0-T12 — Insumos del Dashboard reunidos por Infrastructure.
-/// Los importes ya vienen filtrados: solo movimientos vigentes del mes solicitado.
+/// Los importes del mes vienen filtrados para el periodo consultado.
+/// Los importes acumulados permiten calcular el saldo histórico global sin sesgar el mes.
 /// </summary>
 public sealed record DashboardInputs(
     long OpeningBalanceCents,
@@ -14,7 +15,10 @@ public sealed record DashboardInputs(
     long ConfirmedPaymentsCents,
     long PlannedIncomeCents,
     long PendingChargesCents,
-    long PlannedExpensesCents);
+    long PlannedExpensesCents,
+    long? CumulativeIncomeCents = null,
+    long? CumulativeExpensesCents = null,
+    long? CumulativePaymentsCents = null);
 
 /// <summary>
 /// F0-11, F0-T12 — Cálculo financiero centralizado en Core.
@@ -32,8 +36,13 @@ public static class DashboardCalculator
         var totalExpenses = checked(
             inputs.ConfirmedPaymentsCents + inputs.ConfirmedExpensesCents);
 
+        var cumulativeIncome = inputs.CumulativeIncomeCents ?? inputs.ConfirmedIncomeCents;
+        var cumulativeExpenses = inputs.CumulativeExpensesCents.HasValue && inputs.CumulativePaymentsCents.HasValue
+            ? checked(inputs.CumulativeExpensesCents.Value + inputs.CumulativePaymentsCents.Value)
+            : totalExpenses;
+
         var currentBalance = checked(
-            inputs.OpeningBalanceCents + inputs.ConfirmedIncomeCents - totalExpenses);
+            inputs.OpeningBalanceCents + cumulativeIncome - cumulativeExpenses);
 
         var projectedSavings = checked(
             currentBalance

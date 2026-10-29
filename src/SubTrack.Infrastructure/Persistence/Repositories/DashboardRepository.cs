@@ -51,6 +51,54 @@ internal sealed class DashboardRepository
             until,
             cancellationToken).ConfigureAwait(false);
 
+    public async Task<long> SumConfirmedIncomeRangeAsync(
+        SqliteConnection connection,
+        DateOnly from,
+        DateOnly to,
+        CancellationToken cancellationToken) =>
+        await ScalarRangeAsync(
+            connection,
+            """
+            SELECT COALESCE(SUM(monto_centavos), 0)
+            FROM ingresos
+            WHERE estado = 'CONFIRMADO' AND fecha_real BETWEEN $desde AND $hasta;
+            """,
+            from,
+            to,
+            cancellationToken).ConfigureAwait(false);
+
+    public async Task<long> SumConfirmedExpensesRangeAsync(
+        SqliteConnection connection,
+        DateOnly from,
+        DateOnly to,
+        CancellationToken cancellationToken) =>
+        await ScalarRangeAsync(
+            connection,
+            """
+            SELECT COALESCE(SUM(monto_centavos), 0)
+            FROM gastos
+            WHERE estado = 'CONFIRMADO' AND fecha_real BETWEEN $desde AND $hasta;
+            """,
+            from,
+            to,
+            cancellationToken).ConfigureAwait(false);
+
+    public async Task<long> SumConfirmedPaymentsRangeAsync(
+        SqliteConnection connection,
+        DateOnly from,
+        DateOnly to,
+        CancellationToken cancellationToken) =>
+        await ScalarRangeAsync(
+            connection,
+            """
+            SELECT COALESCE(SUM(monto_centavos), 0)
+            FROM pagos
+            WHERE estado = 'VIGENTE' AND fecha_pago BETWEEN $desde AND $hasta;
+            """,
+            from,
+            to,
+            cancellationToken).ConfigureAwait(false);
+
     public async Task<long> SumPlannedIncomeAsync(
         SqliteConnection connection,
         DateOnly from,
