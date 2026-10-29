@@ -40,6 +40,14 @@ public sealed record SubTrackDatabaseOptions
         };
     }
 
+    public static SubTrackDatabaseOptions CreateForDatabasePath(string databasePath)
+    {
+        return new SubTrackDatabaseOptions
+        {
+            DatabasePath = databasePath
+        }.Normalize();
+    }
+
     /// <summary>
     /// Valida y normaliza las opciones. No crea archivos ni directorios.
     /// </summary>
