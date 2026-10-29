@@ -211,6 +211,23 @@ internal sealed class SubscriptionService : ISubscriptionService
                     "Ya existe una versión vigente desde esa fecha o una posterior.");
             }
 
+            var lastPaidCharge = await _charges.GetLastPaidWithActivePaymentAsync(
+                connection,
+                transaction,
+                subscription.Id,
+                cancellationToken).ConfigureAwait(false);
+
+            if (lastPaidCharge is not null)
+            {
+                var coverageEnd = ChargeScheduling.NextDateAfter(versions, lastPaidCharge.ScheduledDate);
+                if (request.EffectiveFrom < coverageEnd)
+                {
+                    return Result<Subscription>.Fail(
+                        ErrorCodes.PeriodoCubiertoPorPago,
+                        $"No se puede cambiar la suscripción antes del vencimiento del período ya pagado ({coverageEnd:yyyy-MM-dd}).");
+                }
+            }
+
             var horizon = await _charges.GetMaxScheduledDateAsync(
                 connection,
                 transaction,

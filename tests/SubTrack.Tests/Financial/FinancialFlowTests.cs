@@ -518,7 +518,7 @@ public sealed class FinancialFlowTests : IDisposable
     }
 
     [Fact]
-    public async Task DesactivarSuscripcion_ConservaCobrosYBloqueaGeneracion()
+    public async Task DesactivarSuscripcion_EliminaCobrosFuturosSinPagos_YConservaHistoricos()
     {
         var services = await CreateServicesAsync();
         var subscription = await CreateSubscriptionAsync(services);
@@ -542,9 +542,90 @@ public sealed class FinancialFlowTests : IDisposable
             new DateOnly(2026, 10, 1),
             new DateOnly(2026, 12, 31));
 
-        Assert.Equal(3, charges.Value.Count);
+        var remainingCharge = Assert.Single(charges.Value);
+        Assert.Equal(new DateOnly(2026, 10, 28), remainingCharge.ScheduledDate);
     }
 
+    [Fact]
+    public async Task DesactivarSuscripcion_ConservaCobrosConPagosAsociados()
+    {
+        var services = await CreateServicesAsync();
+        var subscription = await CreateSubscriptionAsync(services);
+        await GenerateAsync(services, subscription.Id, new DateOnly(2026, 12, 31));
+
+        var futureCharge = await GetSingleChargeAsync(services, new DateOnly(2026, 11, 28));
+        var payResult = await services.Payments.RegisterAsync(
+            new RegisterPaymentRequest(futureCharge.Id, Today, Guid.NewGuid()));
+        Assert.True(payResult.IsSuccess, Describe(payResult));
+
+        var result = await services.Subscriptions.DeactivateAsync(
+            new DeactivateSubscriptionRequest(subscription.Id, new DateOnly(2026, 11, 1)));
+
+        Assert.True(result.IsSuccess, Describe(result));
+
+        var charges = await services.Charges.GetByRangeAsync(
+            new DateOnly(2026, 10, 1),
+            new DateOnly(2026, 12, 31));
+
+        Assert.Equal(2, charges.Value.Count);
+        Assert.Contains(charges.Value, c => c.ScheduledDate == new DateOnly(2026, 10, 28));
+        Assert.Contains(charges.Value, c => c.ScheduledDate == new DateOnly(2026, 11, 28));
+    }
+
+    [Fact]
+    public async Task DesactivarSuscripcion_SinCobrosPendientesRestantes_NextChargeDateEsNull()
+    {
+        var services = await CreateServicesAsync();
+        var subscription = await CreateSubscriptionAsync(services);
+        await GenerateAsync(services, subscription.Id, new DateOnly(2026, 10, 31));
+
+        var result = await services.Subscriptions.DeactivateAsync(
+            new DeactivateSubscriptionRequest(subscription.Id, new DateOnly(2026, 10, 28)));
+
+        Assert.True(result.IsSuccess, Describe(result));
+        Assert.Null(result.Value.NextChargeDate);
+
+        var charges = await services.Charges.GetByRangeAsync(
+            new DateOnly(2026, 10, 1),
+            new DateOnly(2026, 10, 31));
+        Assert.Empty(charges.Value);
+    }
+    [Fact]
+    public async Task DesactivarSuscripcion_SiFallaTransaccion_HaceRollbackYConservaCobros()
+    {
+        var services = await CreateServicesAsync();
+        var subscription = await CreateSubscriptionAsync(services);
+        await GenerateAsync(services, subscription.Id, new DateOnly(2026, 12, 31));
+
+        await using (var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_options.DatabasePath}"))
+        {
+            await conn.OpenAsync();
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "CREATE TRIGGER fail_deactivate BEFORE UPDATE ON suscripciones BEGIN SELECT RAISE(ABORT, 'Fallo forzado'); END;";
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        var result = await services.Subscriptions.DeactivateAsync(
+            new DeactivateSubscriptionRequest(subscription.Id, new DateOnly(2026, 11, 1)));
+
+        Assert.True(result.IsFailure);
+
+        await using (var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_options.DatabasePath}"))
+        {
+            await conn.OpenAsync();
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "DROP TRIGGER fail_deactivate;";
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        var subCheck = await services.Subscriptions.GetByIdAsync(subscription.Id);
+        Assert.True(subCheck.Value.IsActive);
+
+        var charges = await services.Charges.GetByRangeAsync(
+            new DateOnly(2026, 10, 1),
+            new DateOnly(2026, 12, 31));
+        Assert.Equal(3, charges.Value.Count);
+    }
     [Fact]
     public async Task HistorialDePagos_SePaginaYOrdenaPorFechaDescendente()
     {
@@ -645,6 +726,380 @@ public sealed class FinancialFlowTests : IDisposable
 
     private static string Describe<T>(Result<T> result) =>
         string.Join(" | ", result.Errors.Select(error => $"{error.Code}: {error.Message}"));
+
+    [Fact]
+    public async Task CambiarFrecuencia_MensualATrimestral_GeneraCobrosCadaTresMesesYRespetaHistorial()
+    {
+        var services = await CreateServicesAsync(new DateOnly(2027, 1, 15));
+        var subscription = await CreateSubscriptionAsync(
+            services,
+            new CreateSubscriptionRequest(
+                "Suscripcion Mensual",
+                10_000,
+                AmountType.Fixed,
+                BillingFrequency.Monthly,
+                new DateOnly(2027, 1, 15),
+                Guid.NewGuid()));
+
+        await GenerateAsync(services, subscription.Id, new DateOnly(2027, 4, 30));
+
+        var firstCharge = await GetSingleChargeAsync(services, new DateOnly(2027, 1, 15), subscription.Id);
+        var payResult = await services.Payments.RegisterAsync(
+            new RegisterPaymentRequest(firstCharge.Id, new DateOnly(2027, 1, 15), Guid.NewGuid()));
+        Assert.True(payResult.IsSuccess, Describe(payResult));
+
+        // Cambio a trimestral vigente desde 15 de febrero de 2027 (fin del período mensual pagado)
+        var updated = await services.Subscriptions.UpdateAsync(
+            new UpdateSubscriptionRequest(
+                subscription.Id,
+                "Suscripcion Mensual",
+                28_000,
+                AmountType.Fixed,
+                BillingFrequency.Quarterly,
+                new DateOnly(2027, 2, 15)));
+
+        Assert.True(updated.IsSuccess, Describe(updated));
+        Assert.Equal(BillingFrequency.Quarterly, updated.Value.Frequency);
+        Assert.Equal(new DateOnly(2027, 2, 15), updated.Value.NextChargeDate);
+
+        await GenerateAsync(services, subscription.Id, new DateOnly(2027, 9, 30));
+
+        var charges = await services.Charges.GetByRangeAsync(new DateOnly(2027, 1, 1), new DateOnly(2027, 9, 30));
+        var subCharges = charges.Value.Where(c => c.SubscriptionId == subscription.Id).OrderBy(c => c.ScheduledDate).ToList();
+
+        // 15/01 (mensual pagado 10_000), 15/02 (trimestral 28_000), 15/05 (trimestral 28_000), 15/08 (trimestral 28_000)
+        Assert.Equal(4, subCharges.Count);
+        Assert.Equal(new DateOnly(2027, 1, 15), subCharges[0].ScheduledDate);
+        Assert.Equal(10_000, subCharges[0].AmountCents);
+        Assert.Equal(ScheduledChargeStatus.Paid, subCharges[0].Status);
+
+        Assert.Equal(new DateOnly(2027, 2, 15), subCharges[1].ScheduledDate);
+        Assert.Equal(28_000, subCharges[1].AmountCents);
+        Assert.Equal(ScheduledChargeStatus.Pending, subCharges[1].Status);
+
+        Assert.Equal(new DateOnly(2027, 5, 15), subCharges[2].ScheduledDate);
+        Assert.Equal(28_000, subCharges[2].AmountCents);
+
+        Assert.Equal(new DateOnly(2027, 8, 15), subCharges[3].ScheduledDate);
+        Assert.Equal(28_000, subCharges[3].AmountCents);
+    }
+
+    [Fact]
+    public async Task CambiarFrecuencia_TrimestralAMensual_AntesDeFinDeCobertura_FallaConError()
+    {
+        var services = await CreateServicesAsync(new DateOnly(2027, 1, 15));
+        var subscription = await CreateSubscriptionAsync(
+            services,
+            new CreateSubscriptionRequest(
+                "Suscripcion Trimestral",
+                30_000,
+                AmountType.Fixed,
+                BillingFrequency.Quarterly,
+                new DateOnly(2027, 1, 15),
+                Guid.NewGuid()));
+
+        await GenerateAsync(services, subscription.Id, new DateOnly(2027, 7, 31));
+
+        var firstCharge = await GetSingleChargeAsync(services, new DateOnly(2027, 1, 15), subscription.Id);
+        var payResult = await services.Payments.RegisterAsync(
+            new RegisterPaymentRequest(firstCharge.Id, new DateOnly(2027, 1, 15), Guid.NewGuid()));
+        Assert.True(payResult.IsSuccess, Describe(payResult));
+
+        // Intento de cambiar a mensual el 15 de febrero (cobertura trimestral rige hasta 15 de abril)
+        var updated = await services.Subscriptions.UpdateAsync(
+            new UpdateSubscriptionRequest(
+                subscription.Id,
+                "Suscripcion Trimestral",
+                10_000,
+                AmountType.Fixed,
+                BillingFrequency.Monthly,
+                new DateOnly(2027, 2, 15)));
+
+        Assert.True(updated.IsFailure);
+        Assert.Contains(updated.Errors, e => e.Code == ErrorCodes.PeriodoCubiertoPorPago);
+    }
+
+    [Fact]
+    public async Task CambiarFrecuencia_TrimestralAMensual_EnFinDeCobertura_AceptaYGeneraMensualidades()
+    {
+        var services = await CreateServicesAsync(new DateOnly(2027, 1, 15));
+        var subscription = await CreateSubscriptionAsync(
+            services,
+            new CreateSubscriptionRequest(
+                "Suscripcion Trimestral",
+                30_000,
+                AmountType.Fixed,
+                BillingFrequency.Quarterly,
+                new DateOnly(2027, 1, 15),
+                Guid.NewGuid()));
+
+        await GenerateAsync(services, subscription.Id, new DateOnly(2027, 7, 31));
+
+        var firstCharge = await GetSingleChargeAsync(services, new DateOnly(2027, 1, 15), subscription.Id);
+        var payResult = await services.Payments.RegisterAsync(
+            new RegisterPaymentRequest(firstCharge.Id, new DateOnly(2027, 1, 15), Guid.NewGuid()));
+        Assert.True(payResult.IsSuccess, Describe(payResult));
+
+        // Cambio a mensual exactamente el 15 de abril de 2027 (fin de cobertura trimestral)
+        var updated = await services.Subscriptions.UpdateAsync(
+            new UpdateSubscriptionRequest(
+                subscription.Id,
+                "Suscripcion Trimestral",
+                10_000,
+                AmountType.Fixed,
+                BillingFrequency.Monthly,
+                new DateOnly(2027, 4, 15)));
+
+        Assert.True(updated.IsSuccess, Describe(updated));
+        Assert.Equal(BillingFrequency.Monthly, updated.Value.Frequency);
+        Assert.Equal(new DateOnly(2027, 4, 15), updated.Value.NextChargeDate);
+
+        await GenerateAsync(services, subscription.Id, new DateOnly(2027, 7, 31));
+
+        var charges = await services.Charges.GetByRangeAsync(new DateOnly(2027, 1, 1), new DateOnly(2027, 7, 31));
+        var subCharges = charges.Value.Where(c => c.SubscriptionId == subscription.Id).OrderBy(c => c.ScheduledDate).ToList();
+
+        // 15/01 (trimestral pagado), 15/04 (mensual), 15/05 (mensual), 15/06 (mensual), 15/07 (mensual)
+        Assert.Equal(5, subCharges.Count);
+        Assert.Equal(new DateOnly(2027, 1, 15), subCharges[0].ScheduledDate);
+        Assert.Equal(ScheduledChargeStatus.Paid, subCharges[0].Status);
+        Assert.Equal(new DateOnly(2027, 4, 15), subCharges[1].ScheduledDate);
+        Assert.Equal(10_000, subCharges[1].AmountCents);
+        Assert.Equal(new DateOnly(2027, 5, 15), subCharges[2].ScheduledDate);
+        Assert.Equal(new DateOnly(2027, 6, 15), subCharges[3].ScheduledDate);
+        Assert.Equal(new DateOnly(2027, 7, 15), subCharges[4].ScheduledDate);
+    }
+
+    [Fact]
+    public async Task CambiarFrecuencia_MensualAAnual_GeneraCobroAnualYProgramaProximoEnUnAno()
+    {
+        var services = await CreateServicesAsync(new DateOnly(2027, 1, 15));
+        var subscription = await CreateSubscriptionAsync(
+            services,
+            new CreateSubscriptionRequest(
+                "Suscripcion Anual",
+                10_000,
+                AmountType.Fixed,
+                BillingFrequency.Monthly,
+                new DateOnly(2027, 1, 15),
+                Guid.NewGuid()));
+
+        await GenerateAsync(services, subscription.Id, new DateOnly(2027, 3, 31));
+
+        var firstCharge = await GetSingleChargeAsync(services, new DateOnly(2027, 1, 15), subscription.Id);
+        var payResult = await services.Payments.RegisterAsync(
+            new RegisterPaymentRequest(firstCharge.Id, new DateOnly(2027, 1, 15), Guid.NewGuid()));
+        Assert.True(payResult.IsSuccess, Describe(payResult));
+
+        // Cambio a anual vigente desde 15 de febrero de 2027
+        var updated = await services.Subscriptions.UpdateAsync(
+            new UpdateSubscriptionRequest(
+                subscription.Id,
+                "Suscripcion Anual",
+                100_000,
+                AmountType.Fixed,
+                BillingFrequency.Annual,
+                new DateOnly(2027, 2, 15)));
+
+        Assert.True(updated.IsSuccess, Describe(updated));
+        Assert.Equal(BillingFrequency.Annual, updated.Value.Frequency);
+        Assert.Equal(new DateOnly(2027, 2, 15), updated.Value.NextChargeDate);
+
+        var charges = await services.Charges.GetByRangeAsync(new DateOnly(2027, 1, 1), new DateOnly(2027, 12, 31));
+        var subCharges = charges.Value.Where(c => c.SubscriptionId == subscription.Id).OrderBy(c => c.ScheduledDate).ToList();
+
+        // 15/01/2027 (mensual pagado 10_000), 15/02/2027 (anual pendiente 100_000)
+        Assert.Equal(2, subCharges.Count);
+        Assert.Equal(new DateOnly(2027, 1, 15), subCharges[0].ScheduledDate);
+        Assert.Equal(ScheduledChargeStatus.Paid, subCharges[0].Status);
+
+        Assert.Equal(new DateOnly(2027, 2, 15), subCharges[1].ScheduledDate);
+        Assert.Equal(100_000, subCharges[1].AmountCents);
+    }
+
+    [Fact]
+    public async Task CambiarFrecuencia_AnualAMensual_AntesDeFinDeCobertura_FallaConError()
+    {
+        var services = await CreateServicesAsync(new DateOnly(2027, 1, 15));
+        var subscription = await CreateSubscriptionAsync(
+            services,
+            new CreateSubscriptionRequest(
+                "Suscripcion Anual",
+                100_000,
+                AmountType.Fixed,
+                BillingFrequency.Annual,
+                new DateOnly(2027, 1, 15),
+                Guid.NewGuid()));
+
+        await GenerateAsync(services, subscription.Id, new DateOnly(2027, 6, 30));
+
+        var firstCharge = await GetSingleChargeAsync(services, new DateOnly(2027, 1, 15), subscription.Id);
+        var payResult = await services.Payments.RegisterAsync(
+            new RegisterPaymentRequest(firstCharge.Id, new DateOnly(2027, 1, 15), Guid.NewGuid()));
+        Assert.True(payResult.IsSuccess, Describe(payResult));
+
+        // Intento de pasar a mensual en junio de 2027 (el año rige hasta 15/01/2028)
+        var updated = await services.Subscriptions.UpdateAsync(
+            new UpdateSubscriptionRequest(
+                subscription.Id,
+                "Suscripcion Anual",
+                10_000,
+                AmountType.Fixed,
+                BillingFrequency.Monthly,
+                new DateOnly(2027, 6, 15)));
+
+        Assert.True(updated.IsFailure);
+        Assert.Contains(updated.Errors, e => e.Code == ErrorCodes.PeriodoCubiertoPorPago);
+    }
+
+    [Fact]
+    public async Task CambiarFrecuencia_AnualAMensual_EnFinDeCobertura_AceptaYGeneraMensualidades()
+    {
+        var services = await CreateServicesAsync(new DateOnly(2027, 1, 15));
+        var subscription = await CreateSubscriptionAsync(
+            services,
+            new CreateSubscriptionRequest(
+                "Suscripcion Anual",
+                100_000,
+                AmountType.Fixed,
+                BillingFrequency.Annual,
+                new DateOnly(2027, 1, 15),
+                Guid.NewGuid()));
+
+        await GenerateAsync(services, subscription.Id, new DateOnly(2027, 6, 30));
+
+        var firstCharge = await GetSingleChargeAsync(services, new DateOnly(2027, 1, 15), subscription.Id);
+        var payResult = await services.Payments.RegisterAsync(
+            new RegisterPaymentRequest(firstCharge.Id, new DateOnly(2027, 1, 15), Guid.NewGuid()));
+        Assert.True(payResult.IsSuccess, Describe(payResult));
+
+        // Simulamos avanzar el reloj al fin de cobertura (enero de 2028)
+        var services2028 = await CreateServicesAsync(new DateOnly(2028, 1, 15));
+
+        // Cambio a mensual exactamente el 15 de enero de 2028 (al expirar cobertura anual)
+        var updated = await services2028.Subscriptions.UpdateAsync(
+            new UpdateSubscriptionRequest(
+                subscription.Id,
+                "Suscripcion Anual",
+                10_000,
+                AmountType.Fixed,
+                BillingFrequency.Monthly,
+                new DateOnly(2028, 1, 15)));
+
+        Assert.True(updated.IsSuccess, Describe(updated));
+        Assert.Equal(BillingFrequency.Monthly, updated.Value.Frequency);
+        Assert.Equal(new DateOnly(2028, 1, 15), updated.Value.NextChargeDate);
+
+        await GenerateAsync(services2028, subscription.Id, new DateOnly(2028, 5, 31));
+
+        var charges = await services2028.Charges.GetByRangeAsync(new DateOnly(2027, 1, 1), new DateOnly(2028, 5, 31));
+        var subCharges = charges.Value.Where(c => c.SubscriptionId == subscription.Id).OrderBy(c => c.ScheduledDate).ToList();
+
+        // 15/01/2027 (anual pagado), 15/01/2028 (mensual), 15/02/2028 (mensual), 15/03/2028 (mensual), 15/04/2028 (mensual), 15/05/2028 (mensual)
+        Assert.Equal(6, subCharges.Count);
+        Assert.Equal(new DateOnly(2027, 1, 15), subCharges[0].ScheduledDate);
+        Assert.Equal(ScheduledChargeStatus.Paid, subCharges[0].Status);
+
+        Assert.Equal(new DateOnly(2028, 1, 15), subCharges[1].ScheduledDate);
+        Assert.Equal(10_000, subCharges[1].AmountCents);
+        Assert.Equal(new DateOnly(2028, 2, 15), subCharges[2].ScheduledDate);
+        Assert.Equal(new DateOnly(2028, 3, 15), subCharges[3].ScheduledDate);
+        Assert.Equal(new DateOnly(2028, 4, 15), subCharges[4].ScheduledDate);
+        Assert.Equal(new DateOnly(2028, 5, 15), subCharges[5].ScheduledDate);
+    }
+
+    [Fact]
+    public async Task CambiarFrecuencia_ConPagoAnulado_NoBloqueaIndebidamenteElCambio()
+    {
+        var services = await CreateServicesAsync(new DateOnly(2027, 1, 15));
+        var subscription = await CreateSubscriptionAsync(
+            services,
+            new CreateSubscriptionRequest(
+                "Suscripcion Trimestral",
+                30_000,
+                AmountType.Fixed,
+                BillingFrequency.Quarterly,
+                new DateOnly(2027, 1, 15),
+                Guid.NewGuid()));
+
+        await GenerateAsync(services, subscription.Id, new DateOnly(2027, 7, 31));
+
+        var firstCharge = await GetSingleChargeAsync(services, new DateOnly(2027, 1, 15), subscription.Id);
+        var payResult = await services.Payments.RegisterAsync(
+            new RegisterPaymentRequest(firstCharge.Id, new DateOnly(2027, 1, 15), Guid.NewGuid()));
+        Assert.True(payResult.IsSuccess, Describe(payResult));
+
+        // Anular el pago
+        var cancelResult = await services.Payments.CancelAsync(
+            new CancelPaymentRequest(payResult.Value.Id, "Error de facturacion"));
+        Assert.True(cancelResult.IsSuccess, Describe(cancelResult));
+
+        // Al estar anulado el pago, no hay cobertura vigente que bloquee el cambio desde el 15 de febrero
+        var updated = await services.Subscriptions.UpdateAsync(
+            new UpdateSubscriptionRequest(
+                subscription.Id,
+                "Suscripcion Trimestral",
+                10_000,
+                AmountType.Fixed,
+                BillingFrequency.Monthly,
+                new DateOnly(2027, 2, 15)));
+
+        Assert.True(updated.IsSuccess, Describe(updated));
+        Assert.Equal(BillingFrequency.Monthly, updated.Value.Frequency);
+    }
+
+    [Fact]
+    public async Task CambiarFrecuencia_ConDiaAncla31_PreservaReglaF0T31()
+    {
+        var services = await CreateServicesAsync(new DateOnly(2027, 1, 31));
+        var subscription = await CreateSubscriptionAsync(
+            services,
+            new CreateSubscriptionRequest(
+                "Suscripcion 31",
+                30_000,
+                AmountType.Fixed,
+                BillingFrequency.Quarterly,
+                new DateOnly(2027, 1, 31),
+                Guid.NewGuid()));
+
+        Assert.Equal(31, subscription.AnchorDay);
+
+        // Cobro 31/01/2027 cubre trimestre hasta 30/04/2027
+        await GenerateAsync(services, subscription.Id, new DateOnly(2027, 8, 31));
+
+        var firstCharge = await GetSingleChargeAsync(services, new DateOnly(2027, 1, 31), subscription.Id);
+        var payResult = await services.Payments.RegisterAsync(
+            new RegisterPaymentRequest(firstCharge.Id, new DateOnly(2027, 1, 31), Guid.NewGuid()));
+        Assert.True(payResult.IsSuccess, Describe(payResult));
+
+        // Cambio a mensual efectivo el 30 de abril de 2027 (fin de cobertura trimestral para día ancla 31)
+        var updated = await services.Subscriptions.UpdateAsync(
+            new UpdateSubscriptionRequest(
+                subscription.Id,
+                "Suscripcion 31",
+                10_000,
+                AmountType.Fixed,
+                BillingFrequency.Monthly,
+                new DateOnly(2027, 4, 30)));
+
+        Assert.True(updated.IsSuccess, Describe(updated));
+        Assert.Equal(31, updated.Value.AnchorDay);
+        Assert.Equal(BillingFrequency.Monthly, updated.Value.Frequency);
+
+        await GenerateAsync(services, subscription.Id, new DateOnly(2027, 8, 31));
+
+        var charges = await services.Charges.GetByRangeAsync(new DateOnly(2027, 1, 1), new DateOnly(2027, 8, 31));
+        var subCharges = charges.Value.Where(c => c.SubscriptionId == subscription.Id).OrderBy(c => c.ScheduledDate).ToList();
+
+        // 31/01 (trimestral pagado), 30/04 (mensual), 31/05 (mensual), 30/06 (mensual), 31/07 (mensual), 31/08 (mensual)
+        Assert.Equal(6, subCharges.Count);
+        Assert.Equal(new DateOnly(2027, 1, 31), subCharges[0].ScheduledDate);
+        Assert.Equal(new DateOnly(2027, 4, 30), subCharges[1].ScheduledDate);
+        Assert.Equal(new DateOnly(2027, 5, 31), subCharges[2].ScheduledDate);
+        Assert.Equal(new DateOnly(2027, 6, 30), subCharges[3].ScheduledDate);
+        Assert.Equal(new DateOnly(2027, 7, 31), subCharges[4].ScheduledDate);
+        Assert.Equal(new DateOnly(2027, 8, 31), subCharges[5].ScheduledDate);
+    }
 }
 
 /// <summary>Reloj fijo en UTC para que las reglas de «hoy» sean deterministas.</summary>
