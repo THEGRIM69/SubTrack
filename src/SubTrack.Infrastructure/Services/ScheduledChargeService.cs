@@ -188,6 +188,18 @@ internal sealed class ScheduledChargeService : IScheduledChargeService
         return Result<IReadOnlyList<ScheduledCharge>>.Ok(charges);
     }
 
+    public async Task<Result<IReadOnlyList<ScheduledCharge>>> GetAllAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _factory.OpenAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        var charges = await _charges.GetAllAsync(connection, cancellationToken)
+            .ConfigureAwait(false);
+
+        return Result<IReadOnlyList<ScheduledCharge>>.Ok(charges);
+    }
+
     public async Task<Result<IReadOnlyList<ScheduledCharge>>> GetOverdueAsync(
         DateOnly asOf,
         CancellationToken cancellationToken = default)
@@ -305,6 +317,14 @@ internal sealed class ScheduledChargeService : IScheduledChargeService
             return Result<ScheduledCharge>.Fail(
                 ErrorCodes.FechaRequerida,
                 "Debe indicar la fecha del cobro anterior.");
+        }
+
+        if (DomainValidation.DateBeforeToday(
+                request.ScheduledDate,
+                _clock.Today,
+                "ScheduledDate") is { } dateError)
+        {
+            return Result<ScheduledCharge>.Fail(dateError);
         }
 
         var now = _clock.UtcNow;

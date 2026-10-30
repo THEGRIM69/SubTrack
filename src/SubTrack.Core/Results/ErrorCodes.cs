@@ -12,6 +12,7 @@ public static class ErrorCodes
     public const string ImporteInvalido = "IMPORTE_INVALIDO";
     public const string FechaRequerida = "FECHA_REQUERIDA";
     public const string FechaFuturaNoPermitida = "FECHA_FUTURA_NO_PERMITIDA";
+    public const string FechaAnteriorRequerida = "FECHA_ANTERIOR_REQUERIDA";
     public const string RangoExcedido = "RANGO_EXCEDIDO";
     public const string MotivoRequerido = "MOTIVO_REQUERIDO";
     public const string DiaAnclaInvalido = "DIA_ANCLA_INVALIDO";
@@ -51,6 +52,7 @@ public static class ErrorCodes
     public const string IngresoYaConfirmado = "INGRESO_YA_CONFIRMADO";
     public const string IngresoYaAnulado = "INGRESO_YA_ANULADO";
     public const string PlantillaNoEncontrada = "PLANTILLA_NO_ENCONTRADA";
+    public const string PlantillaInactiva = "PLANTILLA_INACTIVA";
 
     // Categorías
     public const string CategoriaNoEncontrada = "CATEGORIA_NO_ENCONTRADA";

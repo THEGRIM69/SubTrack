@@ -179,6 +179,7 @@ internal sealed class SubscriptionsView : ViewBase
             return;
         }
 
+        using var operation = BeginOperation();
         var startDate = DateOnly.FromDateTime(start.Value);
         var today = DateOnly.FromDateTime(DateTime.Today);
         var cents = Format.Cents(amount.Value);
@@ -202,15 +203,25 @@ internal sealed class SubscriptionsView : ViewBase
         }
 
         var endOfMonth = new DateOnly(today.Year, today.Month, DateTime.DaysInMonth(today.Year, today.Month));
-        var until = startDate > endOfMonth ? startDate : endOfMonth;
-        if (until >= today)
+        var maxHorizon = today.AddMonths(12);
+        var requestedUntil = startDate > endOfMonth ? startDate : endOfMonth;
+        var until = requestedUntil > maxHorizon ? maxHorizon : requestedUntil;
+        var chargesResult = await Context.Services.Charges.GenerateAsync(new GenerateChargesRequest(
+            result.Value.Id,
+            until));
+
+        if (!chargesResult.IsSuccess)
         {
-            await Context.Services.Charges.GenerateAsync(new GenerateChargesRequest(
-                result.Value.Id,
-                until));
+            Notify(
+                $"La suscripción se guardó, pero no se pudieron generar sus cobros: {Describe(chargesResult.Errors)}",
+                true);
+            await DataChangedAsync(DataChangeKind.Subscriptions | DataChangeKind.Charges);
+            return;
         }
 
-        Notify($"Suscripción creada: {result.Value.Name}.");
+        Notify(startDate > maxHorizon
+            ? $"Suscripción creada: {result.Value.Name}. El primer cobro se generará cuando entre en el horizonte de 12 meses."
+            : $"Suscripción creada: {result.Value.Name}.");
         await DataChangedAsync(DataChangeKind.Subscriptions | DataChangeKind.Charges);
     }
 
@@ -237,6 +248,7 @@ internal sealed class SubscriptionsView : ViewBase
             return;
         }
 
+        using var operation = BeginOperation();
         var cents = Format.Cents(amount.Value);
 
         var result = await Context.Services.Subscriptions.UpdateAsync(new UpdateSubscriptionRequest(
@@ -276,6 +288,7 @@ internal sealed class SubscriptionsView : ViewBase
             return;
         }
 
+        using var operation = BeginOperation();
         var result = await Context.Services.Subscriptions.DeactivateAsync(
             new DeactivateSubscriptionRequest(subscription.Id, DateOnly.FromDateTime(effective.Value)));
 
@@ -317,6 +330,7 @@ internal sealed class SubscriptionsView : ViewBase
             return;
         }
 
+        using var operation = BeginOperation();
         var result = await Context.Services.Charges.GenerateAsync(
             new GenerateChargesRequest(subscription.Id, DateOnly.FromDateTime(until.Value)));
 
@@ -329,7 +343,7 @@ internal sealed class SubscriptionsView : ViewBase
             ? "No había cobros nuevos por generar."
             : $"{result.Value.Count} cobros generados para {subscription.Name}.");
 
-        await DataChangedAsync(DataChangeKind.Charges);
+        await DataChangedAsync(DataChangeKind.Subscriptions | DataChangeKind.Charges);
     }
 
     private async Task InitialChargeAsync()
@@ -345,13 +359,16 @@ internal sealed class SubscriptionsView : ViewBase
             "Registrar");
 
         var amount = dialog.AddMoney("Importe", subscription.AmountCents / 100m);
-        var date = dialog.AddDate("Fecha del cobro", DateTime.Today);
+        var yesterday = DateTime.Today.AddDays(-1);
+        var date = dialog.AddDate("Fecha del cobro", yesterday);
+        date.MaxDate = yesterday;
 
         if (dialog.ShowDialog(FindForm()) != DialogResult.OK)
         {
             return;
         }
 
+        using var operation = BeginOperation();
         var result = await Context.Services.Charges.RegisterInitialPendingAsync(
             new RegisterInitialPendingChargeRequest(
                 subscription.Id,
@@ -364,7 +381,7 @@ internal sealed class SubscriptionsView : ViewBase
         }
 
         Notify("Cobro inicial registrado.");
-        await DataChangedAsync(DataChangeKind.Charges);
+        await DataChangedAsync(DataChangeKind.Subscriptions | DataChangeKind.Charges);
     }
 
     private async Task ShowVersionsAsync()

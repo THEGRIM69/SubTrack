@@ -236,6 +236,31 @@ public sealed class ExpenseIncomeDashboardTests : IDisposable
     }
 
     [Fact]
+    public async Task Gasto_ConCategoriaInactiva_SePuedeEditarSinCambiarLaCategoria()
+    {
+        var services = await CreateServicesAsync();
+        var created = await services.Expenses.CreateAsync(
+            new CreateExpenseRequest("Taxi", Transport, 900, Today, null, Guid.NewGuid()));
+
+        await services.Categories.DeactivateAsync(Transport);
+
+        var edited = await services.Expenses.UpdateAsync(
+            new UpdateExpenseRequest(created.Value.Id, "Taxi de regreso", Transport, 1_100, Today));
+
+        Assert.True(edited.IsSuccess, Describe(edited));
+        Assert.Equal(Transport, edited.Value.CategoryId);
+        Assert.Equal("Taxi de regreso", edited.Value.Concept);
+
+        var otherExpense = await services.Expenses.CreateAsync(
+            new CreateExpenseRequest("Comida", Food, 2_000, Today, null, Guid.NewGuid()));
+        var movedToInactiveCategory = await services.Expenses.UpdateAsync(
+            new UpdateExpenseRequest(otherExpense.Value.Id, "Comida", Transport, 2_000, Today));
+
+        Assert.True(movedToInactiveCategory.IsFailure);
+        Assert.Equal(ErrorCodes.CategoriaInactiva, Assert.Single(movedToInactiveCategory.Errors).Code);
+    }
+
+    [Fact]
     public async Task Categorias_NoPermitenNombresDuplicadosNiBorrarConGastos()
     {
         var services = await CreateServicesAsync();
@@ -303,6 +328,10 @@ public sealed class ExpenseIncomeDashboardTests : IDisposable
             generated.Value.Select(income => income.PlannedDate));
 
         Assert.All(generated.Value, income => Assert.Equal(IncomeStatus.Planned, income.Status));
+
+        var confirmed = await services.Incomes.ConfirmAsync(
+            new ConfirmIncomeRequest(generated.Value[0].Id, Today));
+        Assert.True(confirmed.IsSuccess, Describe(confirmed));
 
         var again = await services.Incomes.GeneratePlannedAsync(
             new GeneratePlannedIncomesRequest(template.Value.Id, new DateOnly(2027, 1, 31)));
@@ -406,6 +435,79 @@ public sealed class ExpenseIncomeDashboardTests : IDisposable
         Assert.True(withInactive.IsSuccess, Describe(withInactive));
         Assert.Equal(new[] { "Alfa" }, withoutInactive.Value.Select(template => template.Concept));
         Assert.Equal(new[] { "Alfa", "Zeta" }, withInactive.Value.Select(template => template.Concept));
+    }
+
+    [Fact]
+    public async Task Plantilla_EditarYDesactivarPersisteSinAlterarIngresosGenerados()
+    {
+        var services = await CreateServicesAsync();
+        var created = await services.Incomes.CreateTemplateAsync(
+            new CreateIncomeTemplateRequest(
+                "Sueldo",
+                300_000,
+                IncomeType.Monthly,
+                31,
+                new DateOnly(2026, 10, 1),
+                Guid.NewGuid()));
+
+        var october = await services.Incomes.GeneratePlannedAsync(
+            new GeneratePlannedIncomesRequest(created.Value.Id, new DateOnly(2026, 10, 31)));
+        Assert.True(october.IsSuccess, Describe(october));
+        var originalIncome = Assert.Single(october.Value);
+
+        var updated = await services.Incomes.UpdateTemplateAsync(
+            new UpdateIncomeTemplateRequest(
+                created.Value.Id,
+                "Pago quincenal",
+                150_000,
+                IncomeType.Biweekly,
+                15,
+                new DateOnly(2026, 11, 1)));
+
+        Assert.True(updated.IsSuccess, Describe(updated));
+        Assert.Equal("Pago quincenal", updated.Value.Concept);
+        Assert.Equal(IncomeType.Biweekly, updated.Value.Frequency);
+
+        var history = await services.Incomes.GetHistoryAsync(new IncomeHistoryRequest(new PageRequest()));
+        var persistedOriginal = Assert.Single(history.Value.Items);
+        Assert.Equal(originalIncome.Id, persistedOriginal.Id);
+        Assert.Equal("Sueldo", persistedOriginal.Concept);
+        Assert.Equal(300_000, persistedOriginal.AmountCents);
+
+        var november = await services.Incomes.GeneratePlannedAsync(
+            new GeneratePlannedIncomesRequest(created.Value.Id, new DateOnly(2026, 11, 30)));
+        Assert.Equal(
+            new[] { new DateOnly(2026, 11, 15), new DateOnly(2026, 11, 30) },
+            november.Value.Select(income => income.PlannedDate));
+        Assert.All(november.Value, income =>
+        {
+            Assert.Equal("Pago quincenal", income.Concept);
+            Assert.Equal(150_000, income.AmountCents);
+        });
+
+        var deactivated = await services.Incomes.SetTemplateActiveAsync(
+            new SetIncomeTemplateActiveRequest(created.Value.Id, false));
+        Assert.True(deactivated.IsSuccess, Describe(deactivated));
+        Assert.False(deactivated.Value.IsActive);
+
+        var activeTemplates = await services.Incomes.GetTemplatesAsync(includeInactive: false);
+        var allTemplates = await services.Incomes.GetTemplatesAsync(includeInactive: true);
+        Assert.Empty(activeTemplates.Value);
+        Assert.False(Assert.Single(allTemplates.Value).IsActive);
+
+        var blockedGeneration = await services.Incomes.GeneratePlannedAsync(
+            new GeneratePlannedIncomesRequest(created.Value.Id, new DateOnly(2026, 12, 31)));
+        Assert.True(blockedGeneration.IsFailure);
+        Assert.Equal(ErrorCodes.PlantillaInactiva, Assert.Single(blockedGeneration.Errors).Code);
+
+        var reactivated = await services.Incomes.SetTemplateActiveAsync(
+            new SetIncomeTemplateActiveRequest(created.Value.Id, true));
+        Assert.True(reactivated.IsSuccess, Describe(reactivated));
+        Assert.True(reactivated.Value.IsActive);
+
+        var noDuplicates = await services.Incomes.GeneratePlannedAsync(
+            new GeneratePlannedIncomesRequest(created.Value.Id, new DateOnly(2026, 11, 30)));
+        Assert.Empty(noDuplicates.Value);
     }
 
     [Fact]
@@ -644,6 +746,35 @@ public sealed class ExpenseIncomeDashboardTests : IDisposable
         var overdue = Assert.Single(dashboard.Value.OverdueCharges);
         Assert.Equal(new DateOnly(2026, 10, 10), overdue.ScheduledDate);
         Assert.Empty(dashboard.Value.UpcomingCharges);
+    }
+
+    [Fact]
+    public async Task Dashboard_MuestraTodosLosCobrosPendientesFuturosEnOrden()
+    {
+        var services = await CreateServicesAsync();
+        var subscription = await services.Subscriptions.CreateAsync(
+            new CreateSubscriptionRequest(
+                "Internet",
+                6_000,
+                AmountType.Fixed,
+                BillingFrequency.Monthly,
+                new DateOnly(2026, 10, 28),
+                Guid.NewGuid()));
+
+        Assert.True(subscription.IsSuccess, Describe(subscription));
+
+        var generated = await services.Charges.GenerateAsync(
+            new GenerateChargesRequest(subscription.Value.Id, new DateOnly(2026, 11, 30)));
+        Assert.True(generated.IsSuccess, Describe(generated));
+
+        var dashboard = await services.Dashboard.GetAsync(new GetDashboardRequest(Month));
+
+        Assert.True(dashboard.IsSuccess, Describe(dashboard));
+        Assert.Equal(
+            new[] { new DateOnly(2026, 10, 28), new DateOnly(2026, 11, 28) },
+            dashboard.Value.UpcomingCharges.Select(charge => charge.ScheduledDate));
+        Assert.All(dashboard.Value.UpcomingCharges, charge =>
+            Assert.Equal(ScheduledChargeStatus.Pending, charge.Status));
     }
 
     [Fact]

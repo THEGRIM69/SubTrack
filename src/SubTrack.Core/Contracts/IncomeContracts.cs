@@ -13,6 +13,18 @@ public sealed record CreateIncomeTemplateRequest(
     DateOnly StartDate,
     Guid OperationId);
 
+public sealed record UpdateIncomeTemplateRequest(
+    Guid TemplateId,
+    string Concept,
+    long AmountCents,
+    IncomeType Frequency,
+    int AnchorDay,
+    DateOnly StartDate);
+
+public sealed record SetIncomeTemplateActiveRequest(
+    Guid TemplateId,
+    bool IsActive);
+
 /// <summary>
 /// F0-T07 — Generación de los ingresos previstos de una plantilla hasta una fecha.
 /// </summary>

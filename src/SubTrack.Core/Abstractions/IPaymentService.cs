@@ -21,6 +21,10 @@ public interface IPaymentService
         Guid paymentId,
         CancellationToken cancellationToken = default);
 
+    Task<Result<IReadOnlyList<Payment>>> GetByScheduledChargeIdAsync(
+        Guid scheduledChargeId,
+        CancellationToken cancellationToken = default);
+
     Task<Result<PagedResult<Payment>>> GetHistoryAsync(
         PageRequest page,
         CancellationToken cancellationToken = default);

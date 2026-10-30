@@ -13,6 +13,14 @@ public interface IIncomeService
         CreateIncomeTemplateRequest request,
         CancellationToken cancellationToken = default);
 
+    Task<Result<RecurringIncomeTemplate>> UpdateTemplateAsync(
+        UpdateIncomeTemplateRequest request,
+        CancellationToken cancellationToken = default);
+
+    Task<Result<RecurringIncomeTemplate>> SetTemplateActiveAsync(
+        SetIncomeTemplateActiveRequest request,
+        CancellationToken cancellationToken = default);
+
     Task<Result<IReadOnlyList<RecurringIncomeTemplate>>> GetTemplatesAsync(
         bool includeInactive,
         CancellationToken cancellationToken = default);

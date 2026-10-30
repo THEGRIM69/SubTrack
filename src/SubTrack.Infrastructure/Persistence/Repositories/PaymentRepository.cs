@@ -142,6 +142,54 @@ internal sealed class PaymentRepository
         return payments;
     }
 
+    public async Task<IReadOnlyList<Payment>> GetByScheduledChargeIdAsync(
+        SqliteConnection connection,
+        Guid scheduledChargeId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection
+            .CreateCommand(
+                null,
+                $"""
+                {SelectPayments}
+                WHERE cobro_id = $cobro
+                ORDER BY fecha_pago ASC, creado_en ASC;
+                """)
+            .WithParameters(("$cobro", scheduledChargeId.ToString()));
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        var payments = new List<Payment>();
+
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            payments.Add(Map(reader));
+        }
+
+        return payments;
+    }
+
+    public async Task<bool> HasActivePaymentForChargeAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        Guid scheduledChargeId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection
+            .CreateCommand(
+                transaction,
+                """
+                SELECT 1
+                FROM pagos
+                WHERE cobro_id = $cobro AND estado = 'VIGENTE'
+                LIMIT 1;
+                """)
+            .WithParameters(("$cobro", scheduledChargeId.ToString()));
+
+        return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null;
+    }
+
     public async Task<int> CountAsync(
         SqliteConnection connection,
         CancellationToken cancellationToken)

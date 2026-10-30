@@ -201,6 +201,7 @@ Los códigos son estables: no se renombran ni se reutilizan para otro significad
 | `IMPORTE_INVALIDO` | Importe ≤ 0 o fuera de rango | F0-T30, F0-T33 |
 | `FECHA_REQUERIDA` | Falta una fecha obligatoria | F0-T33 |
 | `FECHA_FUTURA_NO_PERMITIDA` | Fecha real posterior a hoy | C-04 |
+| `FECHA_ANTERIOR_REQUERIDA` | Cobro inicial con fecha de hoy o posterior | F0-25 |
 | `RANGO_EXCEDIDO` | Generación mayor a 12 meses | F0-28 |
 | `MOTIVO_REQUERIDO` | Anulación sin motivo | F0-T02 |
 | `DIA_ANCLA_INVALIDO` | Día fuera de 1..31 | F0-T31 |
@@ -370,6 +371,9 @@ Para ingresos quincenales, `AnchorDay` solo admite `15` o `31`, donde `31` signi
 
 Convención: entidades con propiedades `required init` (Infrastructure las materializa con
 inicializadores de objeto); DTOs posicionales (§6).
+
+Un cobro no tiene un concepto independiente: pertenece a una suscripción y la interfaz
+presenta el nombre de esa suscripción como concepto, evitando duplicar texto en SQLite.
 
 ```csharp
 namespace SubTrack.Core.Domain.Entities;
@@ -633,6 +637,18 @@ public sealed record CreateIncomeTemplateRequest(
     DateOnly StartDate,
     Guid OperationId);
 
+public sealed record UpdateIncomeTemplateRequest(
+    Guid TemplateId,
+    string Concept,
+    long AmountCents,
+    IncomeType Frequency,
+    int AnchorDay,
+    DateOnly StartDate);
+
+public sealed record SetIncomeTemplateActiveRequest(
+    Guid TemplateId,
+    bool IsActive);
+
 public sealed record GeneratePlannedIncomesRequest(
     Guid TemplateId,
     DateOnly Until);
@@ -705,6 +721,8 @@ public sealed record PagedResult<T>(
 | `CreateExpenseRequest` | `ActualDate == null` ⇒ estado `Planned`, `PlannedDate` obligatoria. `ActualDate != null` ⇒ estado `Confirmed`, `PlannedDate ??= ActualDate` | F0-07, F0-T08 |
 | `CreateIncomeRequest` | misma regla que gastos | F0-06, F0-19 |
 | `CreateIncomeTemplateRequest` | `Frequency` solo `Monthly` o `Biweekly`; `Biweekly` exige `AnchorDay` 15 o 31 | F0-T07, F0-T01 |
+| `UpdateIncomeTemplateRequest` | valida concepto, importe, frecuencia, día ancla y fecha de inicio; solo modifica generaciones futuras, no ingresos individuales ya creados | F0-T07 |
+| `SetIncomeTemplateActiveRequest` | activar/desactivar no elimina ni modifica los ingresos individuales generados | F0-T07 |
 | `UpdateSubscriptionRequest` | `EffectiveFrom` no puede ser anterior a hoy | F0-09, F0-23 |
 | `GenerateChargesRequest` | `Until` no puede exceder hoy + 12 meses | F0-28 |
 | `RegisterPaymentRequest` | no lleva importe: el pago siempre es por el importe del cobro | F0-04 |
@@ -749,6 +767,9 @@ public interface IScheduledChargeService
     Task<Result<IReadOnlyList<ScheduledCharge>>> GetByRangeAsync(
         DateOnly from, DateOnly to, CancellationToken cancellationToken = default);
 
+    Task<Result<IReadOnlyList<ScheduledCharge>>> GetAllAsync(
+        CancellationToken cancellationToken = default);
+
     Task<Result<IReadOnlyList<ScheduledCharge>>> GetPendingAsync(
         CancellationToken cancellationToken = default);
 
@@ -775,6 +796,9 @@ public interface IPaymentService
 
     Task<Result<Payment>> GetByIdAsync(
         Guid paymentId, CancellationToken cancellationToken = default);
+
+    Task<Result<IReadOnlyList<Payment>>> GetByScheduledChargeIdAsync(
+        Guid scheduledChargeId, CancellationToken cancellationToken = default);
 
     Task<Result<PagedResult<Payment>>> GetHistoryAsync(
         PageRequest page, CancellationToken cancellationToken = default);
@@ -808,6 +832,12 @@ public interface IIncomeService
 {
     Task<Result<RecurringIncomeTemplate>> CreateTemplateAsync(
         CreateIncomeTemplateRequest request, CancellationToken cancellationToken = default);
+
+    Task<Result<RecurringIncomeTemplate>> UpdateTemplateAsync(
+        UpdateIncomeTemplateRequest request, CancellationToken cancellationToken = default);
+
+    Task<Result<RecurringIncomeTemplate>> SetTemplateActiveAsync(
+        SetIncomeTemplateActiveRequest request, CancellationToken cancellationToken = default);
 
     Task<Result<IReadOnlyList<RecurringIncomeTemplate>>> GetTemplatesAsync(
         bool includeInactive, CancellationToken cancellationToken = default);

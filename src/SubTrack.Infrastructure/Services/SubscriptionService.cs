@@ -33,7 +33,7 @@ internal sealed class SubscriptionService : ISubscriptionService
         CreateSubscriptionRequest request,
         CancellationToken cancellationToken = default)
     {
-        var errors = ValidateCreate(request);
+        var errors = ValidateCreate(request, _clock.Today);
 
         if (errors.Count > 0)
         {
@@ -234,9 +234,10 @@ internal sealed class SubscriptionService : ISubscriptionService
                 subscription.Id,
                 cancellationToken).ConfigureAwait(false);
 
-            if (horizon is null || horizon < request.EffectiveFrom)
+            var maxHorizon = today.AddMonths(MaxHorizonMonths);
+            if (horizon is null || horizon < request.EffectiveFrom || horizon > maxHorizon)
             {
-                horizon = request.EffectiveFrom.AddMonths(MaxHorizonMonths);
+                horizon = maxHorizon;
             }
 
             var newVersion = new SubscriptionVersion
@@ -523,7 +524,9 @@ internal sealed class SubscriptionService : ISubscriptionService
             cancellationToken).ConfigureAwait(false);
     }
 
-    private static List<DomainError> ValidateCreate(CreateSubscriptionRequest request)
+    private static List<DomainError> ValidateCreate(
+        CreateSubscriptionRequest request,
+        DateOnly today)
     {
         var errors = new List<DomainError>();
 
@@ -573,6 +576,14 @@ internal sealed class SubscriptionService : ISubscriptionService
 
         foreach (var charge in initial)
         {
+            if (DomainValidation.DateBeforeToday(
+                    charge.ScheduledDate,
+                    today,
+                    "InitialPendingCharges") is { } dateError)
+            {
+                errors.Add(dateError);
+            }
+
             if (charge.AmountCents <= 0)
             {
                 errors.Add(new DomainError(

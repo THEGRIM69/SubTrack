@@ -438,6 +438,62 @@ internal sealed class IncomeRepository
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task UpdateTemplateAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        RecurringIncomeTemplate template,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection
+            .CreateCommand(
+                transaction,
+                """
+                UPDATE ingresos_plantillas
+                SET concepto = $concepto,
+                    monto_centavos = $monto,
+                    frecuencia = $frecuencia,
+                    dia_ancla = $ancla,
+                    fecha_inicio = $inicio,
+                    actualizado_en = $actualizado
+                WHERE id = $id;
+                """)
+            .WithParameters(
+                ("$id", template.Id.ToString()),
+                ("$concepto", template.Concept),
+                ("$monto", template.AmountCents),
+                ("$frecuencia", SqliteEnumCodes.ToCode(template.Frequency)),
+                ("$ancla", template.AnchorDay),
+                ("$inicio", template.StartDate.ToStorage()),
+                ("$actualizado", template.UpdatedAt.ToStorage()));
+
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<bool> SetTemplateActiveAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        Guid templateId,
+        bool isActive,
+        DateTimeOffset updatedAt,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection
+            .CreateCommand(
+                transaction,
+                """
+                UPDATE ingresos_plantillas
+                SET activa = $activa,
+                    actualizado_en = $actualizado
+                WHERE id = $id AND activa <> $activa;
+                """)
+            .WithParameters(
+                ("$id", templateId.ToString()),
+                ("$activa", isActive ? 1 : 0),
+                ("$actualizado", updatedAt.ToStorage()));
+
+        return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
+    }
+
     private static Income Map(SqliteDataReader reader) => new()
     {
         Id = reader.GetGuid("id"),

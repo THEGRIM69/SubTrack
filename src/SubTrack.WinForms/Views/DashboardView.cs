@@ -1,5 +1,6 @@
 using SubTrack.Core.Contracts;
 using SubTrack.Core.Domain.Entities;
+using SubTrack.Core.Domain.Enums;
 using SubTrack.WinForms.Theme;
 using SubTrack.WinForms.UI;
 
@@ -22,10 +23,18 @@ internal sealed class DashboardView : ViewBase
     private readonly Label _total = ValueLabel(15f, FontStyle.Bold, Palette.Danger);
 
     private readonly DataGridView _upcoming = Ui.Grid(("Fecha", 26f), ("Suscripción", 50f), ("Importe", 24f));
+    private readonly DataGridView _activity = Ui.Grid(("Fecha", 22f), ("Actividad", 42f), ("Importe", 20f), ("Estado", 16f));
     private readonly DataGridView _overdue = Ui.Grid(("Fecha", 26f), ("Suscripción", 50f), ("Importe", 24f));
     private readonly Label _upcomingCount = Counter(Palette.PrimaryDeep);
+    private readonly Label _activityCount = Counter(Palette.Muted);
     private readonly Label _overdueCount = Counter(Palette.Danger);
     private readonly BarsChart _chart = new();
+    private readonly Label _chartEmpty = Hint(9f, Palette.Muted, "No hay movimientos confirmados en los últimos 6 meses.");
+    private readonly Label _summaryFigures = Ui.Label("Cargando datos...", 8.5f, Palette.Muted);
+    private readonly Panel _contentPanel = new() { Dock = DockStyle.Fill, BackColor = Palette.Canvas };
+    private Control? _overviewPanel;
+    private Control? _summaryPanel;
+    private Button? _summaryToggle;
 
     private Dictionary<Guid, string> _names = new();
 
@@ -66,38 +75,53 @@ internal sealed class DashboardView : ViewBase
                 new Control[]
                 {
                     Ui.Action("Generar cobros", GenerateAsync, ButtonKind.Primary),
-                    Ui.Action("Actualizar", RefreshAsync)
+                    Ui.Action("Actualizar", RefreshAsync),
+                    _summaryToggle = Ui.Action("Ver resumen", ToggleSummaryAsync)
                 }),
             0,
             0);
 
         root.Controls.Add(BuildHero(), 0, 1);
         root.Controls.Add(BuildKpis(), 0, 2);
-        root.Controls.Add(BuildBottom(), 0, 3);
+        _overviewPanel = BuildOverview();
+        _summaryPanel = BuildSummaryPanel();
+        _summaryPanel.Visible = false;
+        _contentPanel.Controls.Add(_summaryPanel);
+        _contentPanel.Controls.Add(_overviewPanel);
+        root.Controls.Add(_contentPanel, 0, 3);
 
         Ui.Align(_upcoming, "Importe");
         Ui.Align(_overdue, "Importe");
+        Ui.Align(_activity, "Importe");
 
         Controls.Add(root);
     }
 
     protected override async Task LoadAsync()
     {
-        var subscriptions = await Context.Services.Subscriptions.GetAllAsync();
+        var dashboardTask = Context.Services.Dashboard.GetAsync(new GetDashboardRequest(_month.Month));
+        var subscriptionsTask = Context.Services.Subscriptions.GetAllAsync();
+        var paymentsTask = Context.Services.Payments.GetHistoryAsync(new PageRequest(1, 100));
+        var expensesTask = Context.Services.Expenses.GetHistoryAsync(new ExpenseHistoryRequest(new PageRequest(1, 100)));
+        var incomesTask = Context.Services.Incomes.GetHistoryAsync(new IncomeHistoryRequest(new PageRequest(1, 100)));
 
-        if (Failed(subscriptions))
+        await Task.WhenAll(dashboardTask, subscriptionsTask, paymentsTask, expensesTask, incomesTask);
+
+        var result = await dashboardTask;
+        if (Failed(result))
         {
+            ClearDashboard();
             return;
         }
 
-        _names = subscriptions.Value.ToDictionary(subscription => subscription.Id, subscription => subscription.Name);
-        var active = subscriptions.Value.Count(subscription => subscription.IsActive);
-
-        var result = await Context.Services.Dashboard.GetAsync(new GetDashboardRequest(_month.Month));
-
-        if (Failed(result))
+        var subscriptions = await subscriptionsTask;
+        if (Failed(subscriptions))
         {
-            return;
+            _names.Clear();
+        }
+        else
+        {
+            _names = subscriptions.Value.ToDictionary(subscription => subscription.Id, subscription => subscription.Name);
         }
 
         var snapshot = result.Value;
@@ -108,54 +132,122 @@ internal sealed class DashboardView : ViewBase
         _projected.Text = Format.Currency(snapshot.ProjectedSavingsCents);
         _projectedHint.Text = snapshot.ProjectedSavingsCents >= 0 ? "Al cierre del mes" : "Cierre en déficit";
 
-        _active.Text = active.ToString();
-        _activeHint.Text = snapshot.UpcomingCharges.Count == 0
-            ? "Sin cobros por venir"
-            : $"{snapshot.UpcomingCharges.Count} cobros por venir";
+        _active.Text = snapshot.ActiveSubscriptions.ToString();
+        _activeHint.Text = snapshot.ActiveSubscriptions == 1
+            ? "suscripción activa"
+            : "suscripciones activas";
 
         _income.Text = Format.Money(snapshot.IncomeCents);
         _expenses.Text = Format.Money(snapshot.ExpensesCents);
         _payments.Text = Format.Money(snapshot.SubscriptionPaymentsCents);
         _total.Text = Format.Money(snapshot.TotalExpensesCents);
+        _summaryFigures.Text =
+            $"Ingresos {Format.Money(snapshot.IncomeCents)} · Gastos {Format.Money(snapshot.ExpensesCents)} · Suscripciones {Format.Money(snapshot.SubscriptionPaymentsCents)} · Egresos {Format.Money(snapshot.TotalExpensesCents)}";
 
         Fill(_upcoming, snapshot.UpcomingCharges);
+
         Fill(_overdue, snapshot.OverdueCharges);
 
-        _upcomingCount.Text = snapshot.UpcomingCharges.Count == 0
-            ? "Sin pendientes"
-            : $"{snapshot.UpcomingCharges.Count} por cobrar";
-
         _overdueCount.Text = snapshot.OverdueCharges.Count == 0
-            ? "Al día"
+            ? "Sin cargos vencidos"
             : $"{snapshot.OverdueCharges.Count} atrasados";
 
         _overdueCount.ForeColor = snapshot.OverdueCharges.Count == 0 ? Palette.PrimaryDeep : Palette.Danger;
+
+        var payments = await paymentsTask;
+        var expenses = await expensesTask;
+        var incomes = await incomesTask;
+        var activityAvailable = !payments.IsFailure && !expenses.IsFailure && !incomes.IsFailure;
+
+        if (!activityAvailable)
+        {
+            if (payments.IsFailure) Failed(payments);
+            if (expenses.IsFailure) Failed(expenses);
+            if (incomes.IsFailure) Failed(incomes);
+            _activity.Rows.Clear();
+            _activityCount.Text = "No se pudo cargar";
+        }
+        else
+        {
+            FillActivity(payments.Value.Items, expenses.Value.Items, incomes.Value.Items);
+        }
 
         await LoadChartAsync();
     }
 
     private async Task LoadChartAsync()
     {
-        var bars = new List<BarsChart.Bar>();
+        var months = new List<DateOnly>();
         var start = _month.Month.ToDateTime(TimeOnly.MinValue);
 
         for (var offset = 5; offset >= 0; offset--)
         {
-            var month = DateOnly.FromDateTime(start.AddMonths(-offset));
-            var result = await Context.Services.Dashboard.GetAsync(new GetDashboardRequest(month));
-
-            if (!result.IsSuccess)
-            {
-                continue;
-            }
-
-            bars.Add(new BarsChart.Bar(
-                Format.MonthShort(month),
-                result.Value.IncomeCents,
-                result.Value.TotalExpensesCents));
+            months.Add(DateOnly.FromDateTime(start.AddMonths(-offset)));
         }
 
+        var results = await Task.WhenAll(months.Select(month =>
+            Context.Services.Dashboard.GetAsync(new GetDashboardRequest(month))));
+
+        var failures = results.Where(result => result.IsFailure).ToArray();
+        if (failures.Length > 0)
+        {
+            _chart.SetData(Array.Empty<BarsChart.Bar>());
+            _chart.Visible = false;
+            _chartEmpty.Visible = true;
+            Notify($"No se pudo cargar el gráfico: {Describe(failures[0].Errors)}", true);
+            return;
+        }
+
+        var bars = months.Zip(results, (month, result) => new BarsChart.Bar(
+            Format.MonthShort(month),
+            result.Value.IncomeCents,
+            result.Value.TotalExpensesCents)).ToArray();
+
         _chart.SetData(bars);
+        var hasMovements = bars.Any(bar => bar.IncomeCents != 0 || bar.ExpenseCents != 0);
+        _chart.Visible = hasMovements;
+        _chartEmpty.Visible = !hasMovements;
+    }
+
+    private Task ToggleSummaryAsync()
+    {
+        var showSummary = _summaryPanel is not { Visible: true };
+        if (_summaryPanel is null || _overviewPanel is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        _summaryPanel.Visible = showSummary;
+        _overviewPanel.Visible = !showSummary;
+        if (_summaryToggle is not null)
+        {
+            _summaryToggle.Text = showSummary ? "Ocultar resumen" : "Ver resumen";
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private void ClearDashboard()
+    {
+        _balance.Text = "—";
+        _balanceHint.Text = "No se pudieron cargar los datos.";
+        _projected.Text = "—";
+        _projectedHint.Text = "No disponible";
+        _active.Text = "—";
+        _activeHint.Text = "No disponible";
+        _income.Text = "—";
+        _expenses.Text = "—";
+        _payments.Text = "—";
+        _total.Text = "—";
+        _upcoming.Rows.Clear();
+        _activity.Rows.Clear();
+        _overdue.Rows.Clear();
+        _upcomingCount.Text = "No se pudo cargar";
+        _activityCount.Text = "No se pudo cargar";
+        _overdueCount.Text = "No se pudo cargar";
+        _chart.SetData(Array.Empty<BarsChart.Bar>());
+        _chart.Visible = false;
+        _chartEmpty.Visible = true;
     }
 
     private async Task GenerateAsync()
@@ -214,9 +306,15 @@ internal sealed class DashboardView : ViewBase
     {
         grid.Rows.Clear();
 
+        _upcomingCount.Text = charges.Count == 0
+            ? "Sin cargos pendientes próximos"
+            : $"{charges.Count} próximos";
+
         foreach (var charge in charges)
         {
-            var name = _names.TryGetValue(charge.SubscriptionId, out var value) ? value : "—";
+            var name = _names.TryGetValue(charge.SubscriptionId, out var value)
+                ? value
+                : "Suscripción no disponible";
 
             var index = grid.Rows.Add(
                 Format.Date(charge.ScheduledDate),
@@ -224,6 +322,95 @@ internal sealed class DashboardView : ViewBase
                 Format.Money(charge.AmountCents));
 
             grid.Rows[index].Tag = charge;
+        }
+    }
+
+    private void FillActivity(
+        IReadOnlyList<Payment> payments,
+        IReadOnlyList<Expense> expenses,
+        IReadOnlyList<Income> incomes)
+    {
+        var items = new List<ActivityItem>();
+
+        foreach (var payment in payments)
+        {
+            var (status, color) = Ui.PaymentBadge(payment.Status);
+            var activityDate = payment.Status == PaymentStatus.Cancelled && payment.CancelledAt is { } cancelledAt
+                ? DateOnly.FromDateTime(cancelledAt.LocalDateTime)
+                : payment.PaymentDate;
+            var sortAt = payment.Status == PaymentStatus.Cancelled && payment.CancelledAt is { } cancelled
+                ? cancelled.LocalDateTime
+                : payment.PaymentDate.ToDateTime(TimeOnly.MinValue);
+
+            items.Add(new ActivityItem(
+                sortAt,
+                activityDate,
+                "Pago de suscripción",
+                payment.AmountCents,
+                status,
+                color));
+        }
+
+        foreach (var expense in expenses.Where(item =>
+                     item.Status is ExpenseStatus.Confirmed or ExpenseStatus.Cancelled))
+        {
+            var (status, color) = Ui.ExpenseBadge(expense.Status);
+            var cancelled = expense.Status == ExpenseStatus.Cancelled;
+            var activityDate = cancelled && expense.CancelledAt is { } cancelledAt
+                ? DateOnly.FromDateTime(cancelledAt.LocalDateTime)
+                : expense.ActualDate ?? expense.PlannedDate;
+            var sortAt = cancelled && expense.CancelledAt is { } cancellation
+                ? cancellation.LocalDateTime
+                : activityDate.ToDateTime(TimeOnly.MinValue);
+
+            items.Add(new ActivityItem(
+                sortAt,
+                activityDate,
+                $"Gasto · {expense.Concept}",
+                expense.AmountCents,
+                status,
+                color));
+        }
+
+        foreach (var income in incomes.Where(item =>
+                     item.Status is IncomeStatus.Confirmed or IncomeStatus.Cancelled))
+        {
+            var (status, color) = Ui.IncomeBadge(income.Status);
+            var cancelled = income.Status == IncomeStatus.Cancelled;
+            var activityDate = cancelled && income.CancelledAt is { } cancelledAt
+                ? DateOnly.FromDateTime(cancelledAt.LocalDateTime)
+                : income.ActualDate ?? income.PlannedDate;
+            var sortAt = cancelled && income.CancelledAt is { } cancellation
+                ? cancellation.LocalDateTime
+                : activityDate.ToDateTime(TimeOnly.MinValue);
+
+            items.Add(new ActivityItem(
+                sortAt,
+                activityDate,
+                $"Ingreso · {income.Concept}",
+                income.AmountCents,
+                status,
+                color));
+        }
+
+        var recent = items
+            .OrderByDescending(item => item.SortAt)
+            .Take(10)
+            .ToArray();
+
+        _activity.Rows.Clear();
+        _activityCount.Text = recent.Length == 0 ? "Sin actividad reciente" : $"{recent.Length} recientes";
+
+        foreach (var item in recent)
+        {
+            var index = _activity.Rows.Add(
+                Format.Date(item.Date),
+                item.Concept,
+                Format.Money(item.AmountCents),
+                item.Status);
+
+            Ui.Tint(_activity.Rows[index], "Estado", item.Color);
+            _activity.Rows[index].Tag = item;
         }
     }
 
@@ -269,8 +456,8 @@ internal sealed class DashboardView : ViewBase
         var balanceCaption = Ui.Caption("SALDO ACTUAL");
         balanceCaption.ForeColor = Color.FromArgb(150, 162, 172);
 
-        _balance.Text = "$ 0.00";
-        _balanceHint.Text = "—";
+        _balance.Text = "—";
+        _balanceHint.Text = "Cargando datos...";
 
         heroLayout.Controls.Add(balanceCaption, 0, 0);
         heroLayout.Controls.Add(_balance, 0, 1);
@@ -304,8 +491,8 @@ internal sealed class DashboardView : ViewBase
         var projectedCaption = Ui.Caption("AHORRO PROYECTADO");
         projectedCaption.ForeColor = Palette.PrimaryDeep;
 
-        _projected.Text = "$ 0.00";
-        _projectedHint.Text = "Al cierre del mes";
+        _projected.Text = "—";
+        _projectedHint.Text = "Cargando datos...";
 
         projectedLayout.Controls.Add(projectedCaption, 0, 0);
         projectedLayout.Controls.Add(_projected, 0, 1);
@@ -333,8 +520,8 @@ internal sealed class DashboardView : ViewBase
         activeLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         activeLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
-        _active.Text = "0";
-        _activeHint.Text = "suscripciones activas";
+        _active.Text = "—";
+        _activeHint.Text = "Cargando datos...";
 
         activeLayout.Controls.Add(Ui.Caption("SUSCRIPCIONES"), 0, 0);
         activeLayout.Controls.Add(_active, 0, 1);
@@ -369,6 +556,14 @@ internal sealed class DashboardView : ViewBase
         var payments = Kpi("PAGOS DE SUSCRIPCIÓN", _payments, "cobros pagados");
         var total = Kpi("TOTAL EGRESOS", _total, "gastos + suscripciones");
 
+        _income.Text = "—";
+        _expenses.Text = "—";
+        _payments.Text = "—";
+        _total.Text = "—";
+        _upcomingCount.Text = "Cargando datos...";
+        _activityCount.Text = "Cargando datos...";
+        _overdueCount.Text = "Cargando datos...";
+
         income.Margin = new Padding(0, 0, 14, 0);
         expenses.Margin = new Padding(0, 0, 14, 0);
         payments.Margin = new Padding(0, 0, 14, 0);
@@ -381,7 +576,32 @@ internal sealed class DashboardView : ViewBase
         return row;
     }
 
-    private Control BuildBottom()
+    private Control BuildOverview()
+    {
+        var row = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1,
+            BackColor = Palette.Canvas,
+            Margin = new Padding(0)
+        };
+
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 58));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 42));
+
+        _upcoming.RowTemplate.Height = 38;
+        _upcoming.ColumnHeadersHeight = 34;
+        _activity.RowTemplate.Height = 38;
+        _activity.ColumnHeadersHeight = 34;
+
+        row.Controls.Add(BuildList("Próximos cargos", _upcoming, _upcomingCount, true), 0, 0);
+        row.Controls.Add(BuildList("Actividad reciente", _activity, _activityCount, false), 1, 0);
+
+        return row;
+    }
+
+    private Control BuildSummaryPanel()
     {
         var row = new TableLayoutPanel
         {
@@ -402,37 +622,21 @@ internal sealed class DashboardView : ViewBase
             Padding = new Padding(20, 12, 20, 10)
         };
 
-        var chartHint = Ui.Label("Ingresos vs egresos", 8.5f, Palette.Muted);
-        chartHint.TextAlign = ContentAlignment.MiddleRight;
-
+        _summaryFigures.TextAlign = ContentAlignment.MiddleRight;
         _chart.Dock = DockStyle.Fill;
         _chart.Margin = new Padding(0);
+        _chartEmpty.Dock = DockStyle.Fill;
+        _chartEmpty.TextAlign = ContentAlignment.MiddleCenter;
 
         chartCard.Controls.Add(_chart);
-        chartCard.Controls.Add(Ui.Header("Últimos 6 meses", chartHint));
+        chartCard.Controls.Add(_chartEmpty);
+        chartCard.Controls.Add(Ui.Header("Últimos 6 meses", _summaryFigures));
 
-        _upcoming.RowTemplate.Height = 38;
-        _upcoming.ColumnHeadersHeight = 34;
         _overdue.RowTemplate.Height = 38;
         _overdue.ColumnHeadersHeight = 34;
 
-        var lists = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 2,
-            BackColor = Palette.Canvas,
-            Margin = new Padding(0)
-        };
-
-        lists.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-        lists.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-
-        lists.Controls.Add(BuildList("Próximos cobros", _upcoming, _upcomingCount, true), 0, 0);
-        lists.Controls.Add(BuildList("Cobros atrasados", _overdue, _overdueCount, false), 0, 1);
-
         row.Controls.Add(chartCard, 0, 0);
-        row.Controls.Add(lists, 1, 0);
+        row.Controls.Add(BuildList("Cobros vencidos", _overdue, _overdueCount, false), 1, 0);
 
         return row;
     }
@@ -517,4 +721,12 @@ internal sealed class DashboardView : ViewBase
         BackColor = Color.Transparent,
         Margin = new Padding(0)
     };
+
+    private sealed record ActivityItem(
+        DateTime SortAt,
+        DateOnly Date,
+        string Concept,
+        long AmountCents,
+        string Status,
+        Color Color);
 }

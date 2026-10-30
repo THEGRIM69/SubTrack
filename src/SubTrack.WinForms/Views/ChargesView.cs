@@ -13,24 +13,47 @@ internal enum ChargesViewMode
     Payments
 }
 
+internal enum ChargeFilter
+{
+    All,
+    Pending,
+    Paid,
+    Overdue,
+    Cancelled
+}
+
 internal class ChargesView : ViewBase
 {
+    private static readonly (ChargeFilter Value, string Text)[] ChargeFilters =
+    {
+        (ChargeFilter.All, "Todos los cobros"),
+        (ChargeFilter.Pending, "Pendientes"),
+        (ChargeFilter.Paid, "Pagados"),
+        (ChargeFilter.Overdue, "Vencidos"),
+        (ChargeFilter.Cancelled, "Anulados")
+    };
+
     private readonly ChargesViewMode _mode;
     private Card _pendingCard = null!;
     private Card _paymentsCard = null!;
     private TableLayoutPanel _root = null!;
 
-    private readonly DataGridView _pendingGrid = Ui.Grid(
-        ("Fecha", 22f),
-        ("Suscripción", 42f),
+    private readonly ComboBox _chargeFilter = Combo.Create(ChargeFilters, ChargeFilter.All, 180);
+
+    private readonly DataGridView _chargesGrid = Ui.Grid(
+        ("Vencimiento", 18f),
+        ("Suscripción / concepto", 42f),
         ("Importe", 18f),
-        ("Estado", 18f));
+        ("Estado", 22f));
 
     private readonly DataGridView _paymentsGrid = Ui.Grid(
-        ("Fecha", 22f),
-        ("Importe", 20f),
-        ("Comprobante", 34f),
-        ("Estado", 24f));
+        ("Fecha", 11f),
+        ("Suscripción", 20f),
+        ("Vencimiento", 13f),
+        ("Importe", 13f),
+        ("Método", 10f),
+        ("Comprobante", 20f),
+        ("Estado", 13f));
 
     private readonly Pager _pager = new();
     private readonly Label _pendingTitle = new()
@@ -42,6 +65,8 @@ internal class ChargesView : ViewBase
     };
 
     private Dictionary<Guid, string> _names = new();
+    private IReadOnlyList<ScheduledCharge> _charges = Array.Empty<ScheduledCharge>();
+    private Dictionary<Guid, ScheduledCharge> _chargesById = new();
     private int _page = 1;
     private int _totalPages = 1;
 
@@ -83,10 +108,14 @@ internal class ChargesView : ViewBase
             Padding = new Padding(0)
         };
 
+        pendingActions.Controls.Add(_chargeFilter);
         pendingActions.Controls.Add(Ui.Compact(Ui.Action("Pagar", PayAsync, ButtonKind.Primary)));
         pendingActions.Controls.Add(Ui.Compact(Ui.Action("Ajustar", AdjustAsync)));
-        pendingActions.Controls.Add(Ui.Compact(Ui.Action("Generar cobros", GenerateAsync)));
-        pendingActions.Controls.Add(Ui.Compact(Ui.Action("Anular cobro", CancelChargeAsync)));
+        pendingActions.Controls.Add(Ui.Menu(
+            "Más",
+            ("Ver detalles", ShowChargeDetailsAsync),
+            ("Generar cobros", GenerateAsync),
+            ("Anular cobro", CancelChargeAsync)));
 
         var pendingHeader = new TableLayoutPanel
         {
@@ -118,6 +147,7 @@ internal class ChargesView : ViewBase
             Padding = new Padding(0)
         };
 
+        paymentActions.Controls.Add(Ui.Compact(Ui.Action("Detalles", ShowPaymentDetailsAsync)));
         paymentActions.Controls.Add(Ui.Compact(Ui.Action("Anular pago", CancelPaymentAsync)));
         paymentActions.Controls.Add(_pager);
 
@@ -130,7 +160,7 @@ internal class ChargesView : ViewBase
             Margin = new Padding(0, 0, 0, 14)
         };
 
-        _pendingCard.Controls.Add(_pendingGrid);
+        _pendingCard.Controls.Add(_chargesGrid);
         _pendingCard.Controls.Add(pendingHeader);
 
         _paymentsCard = new Card
@@ -159,19 +189,27 @@ internal class ChargesView : ViewBase
         _root.Controls.Add(_pendingCard, 0, 0);
         _root.Controls.Add(_paymentsCard, 0, 1);
 
-        _pendingGrid.RowTemplate.Height = 42;
-        _pendingGrid.ColumnHeadersHeight = 36;
+        _chargesGrid.RowTemplate.Height = 42;
+        _chargesGrid.ColumnHeadersHeight = 36;
         _paymentsGrid.RowTemplate.Height = 42;
         _paymentsGrid.ColumnHeadersHeight = 36;
 
-        Ui.Align(_pendingGrid, "Importe");
+        Ui.Align(_chargesGrid, "Importe");
         Ui.Align(_paymentsGrid, "Importe");
 
-        _pendingGrid.CellDoubleClick += async (_, args) =>
+        _chargeFilter.SelectedIndexChanged += (_, _) => ApplyChargeFilter();
+        _chargesGrid.CellDoubleClick += async (_, args) =>
         {
             if (args.RowIndex >= 0)
             {
-                await PayAsync();
+                await ShowChargeDetailsAsync();
+            }
+        };
+        _paymentsGrid.CellDoubleClick += async (_, args) =>
+        {
+            if (args.RowIndex >= 0)
+            {
+                await ShowPaymentDetailsAsync();
             }
         };
 
@@ -214,18 +252,30 @@ internal class ChargesView : ViewBase
 
     protected override async Task LoadAsync()
     {
+        var subscriptions = await Context.Services.Subscriptions.GetAllAsync();
+
+        if (Failed(subscriptions))
+        {
+            return;
+        }
+
+        _names = subscriptions.Value.ToDictionary(subscription => subscription.Id, subscription => subscription.Name);
+
         if (_mode != ChargesViewMode.Payments)
         {
-            var subscriptions = await Context.Services.Subscriptions.GetAllAsync();
+            await LoadChargesAsync();
+        }
 
-            if (Failed(subscriptions))
+        if (_mode == ChargesViewMode.Payments)
+        {
+            var charges = await Context.Services.Charges.GetAllAsync();
+            if (Failed(charges))
             {
                 return;
             }
 
-            _names = subscriptions.Value.ToDictionary(subscription => subscription.Id, subscription => subscription.Name);
-
-            await LoadPendingAsync();
+            _charges = charges.Value;
+            _chargesById = _charges.ToDictionary(charge => charge.Id);
         }
 
         if (_mode != ChargesViewMode.Charges)
@@ -234,39 +284,120 @@ internal class ChargesView : ViewBase
         }
     }
 
-    private async Task LoadPendingAsync()
+    private async Task LoadChargesAsync()
     {
-        var result = await Context.Services.Charges.GetPendingAsync();
+        var result = await Context.Services.Charges.GetAllAsync();
 
         if (Failed(result))
         {
             return;
         }
 
+        _charges = result.Value;
+        _chargesById = _charges.ToDictionary(charge => charge.Id);
+        ApplyChargeFilter();
+    }
+
+    private void ApplyChargeFilter()
+    {
         var today = DateOnly.FromDateTime(DateTime.Today);
+        var filter = Combo.Value<ChargeFilter>(_chargeFilter);
+        var charges = _charges.Where(charge => filter switch
+        {
+            ChargeFilter.Pending => charge.Status == ScheduledChargeStatus.Pending,
+            ChargeFilter.Paid => charge.Status == ScheduledChargeStatus.Paid,
+            ChargeFilter.Overdue => charge.Status == ScheduledChargeStatus.Pending
+                && charge.ScheduledDate < today,
+            ChargeFilter.Cancelled => charge.Status == ScheduledChargeStatus.Cancelled,
+            _ => true
+        }).ToList();
 
-        _pendingGrid.Rows.Clear();
+        _chargesGrid.Rows.Clear();
 
-        foreach (var charge in result.Value.OrderBy(item => item.ScheduledDate))
+        foreach (var charge in charges)
         {
             var name = _names.TryGetValue(charge.SubscriptionId, out var value) ? value : "—";
-            var overdue = charge.ScheduledDate < today;
+            var overdue = charge.Status == ScheduledChargeStatus.Pending && charge.ScheduledDate < today;
+            var status = overdue ? "● Vencido" : $"● {Format.ChargeStatus(charge.Status)}";
 
-            var index = _pendingGrid.Rows.Add(
+            var index = _chargesGrid.Rows.Add(
                 Format.Date(charge.ScheduledDate),
                 name,
                 Format.Money(charge.AmountCents),
-                overdue ? "● Atrasado" : "● Pendiente");
+                status);
 
-            var row = _pendingGrid.Rows[index];
+            var row = _chargesGrid.Rows[index];
             row.Tag = charge;
 
-            Ui.Tint(row, "Estado", overdue ? Palette.Danger : Palette.Warning);
+            var color = overdue
+                ? Palette.Danger
+                : charge.Status switch
+                {
+                    ScheduledChargeStatus.Paid => Palette.PrimaryDeep,
+                    ScheduledChargeStatus.Cancelled => Palette.Muted,
+                    _ => Palette.Warning
+                };
+            Ui.Tint(row, "Estado", color);
         }
 
-        _pendingTitle.Text = result.Value.Count == 0
-            ? "Cobros pendientes"
-            : $"Cobros pendientes · {result.Value.Count}";
+        _pendingTitle.Text = charges.Count == 0
+            ? $"{ChargeFilterLabel(filter)} · sin resultados"
+            : $"{ChargeFilterLabel(filter)} · {charges.Count}";
+    }
+
+    private static string ChargeFilterLabel(ChargeFilter filter) => filter switch
+    {
+        ChargeFilter.Pending => "Cobros pendientes",
+        ChargeFilter.Paid => "Cobros pagados",
+        ChargeFilter.Overdue => "Cobros vencidos",
+        ChargeFilter.Cancelled => "Cobros anulados",
+        _ => "Todos los cobros"
+    };
+
+    private async Task ShowChargeDetailsAsync()
+    {
+        if (Ui.Selected<ScheduledCharge>(_chargesGrid) is not { } charge)
+        {
+            Notify("Selecciona un cobro para consultar sus detalles.", true);
+            return;
+        }
+
+        var result = await Context.Services.Payments.GetByScheduledChargeIdAsync(charge.Id);
+
+        if (Failed(result))
+        {
+            return;
+        }
+
+        var name = _names.TryGetValue(charge.SubscriptionId, out var value) ? value : "Suscripción no disponible";
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var status = charge.Status == ScheduledChargeStatus.Pending && charge.ScheduledDate < today
+            ? "Vencido"
+            : Format.ChargeStatus(charge.Status);
+        var rows = result.Value.Count == 0
+            ? new[] { new[] { "—", "—", "—", "Sin pagos asociados", "—" } }
+            : result.Value.Select(payment => new[]
+            {
+                Format.Date(payment.PaymentDate),
+                Format.Money(payment.AmountCents),
+                payment.VoucherNumber,
+                Format.PaymentStatus(payment.Status),
+                payment.CancellationReason ?? "—"
+            });
+
+        TableView.Show(
+            FindForm(),
+            "Detalles del cobro",
+            $"{name} · vencimiento {Format.Date(charge.ScheduledDate)} · {Format.Currency(charge.AmountCents)} · {status}",
+            new[]
+            {
+                ("Fecha de pago", 18f),
+                ("Importe", 16f),
+                ("Comprobante", 22f),
+                ("Estado", 16f),
+                ("Motivo de anulación", 28f)
+            },
+            rows);
     }
 
     private async Task LoadPaymentsAsync()
@@ -292,9 +423,17 @@ internal class ChargesView : ViewBase
 
             foreach (var payment in result.Value.Items)
             {
+                var charge = _chargesById.GetValueOrDefault(payment.ScheduledChargeId);
+                var subscriptionName = charge is not null
+                    && _names.TryGetValue(charge.SubscriptionId, out var name)
+                        ? name
+                        : "—";
                 var index = _paymentsGrid.Rows.Add(
                     Format.Date(payment.PaymentDate),
+                    subscriptionName,
+                    charge is null ? "—" : Format.Date(charge.ScheduledDate),
                     Format.Money(payment.AmountCents),
+                    "No registrado en 1.0",
                     payment.VoucherNumber,
                     payment.Status == PaymentStatus.Active ? "● Vigente" : "● Anulado");
 
@@ -313,9 +452,15 @@ internal class ChargesView : ViewBase
 
     private async Task PayAsync()
     {
-        if (Ui.Selected<ScheduledCharge>(_pendingGrid) is not { } charge)
+        if (Ui.Selected<ScheduledCharge>(_chargesGrid) is not { } charge)
         {
             Notify("Selecciona un cobro pendiente.", true);
+            return;
+        }
+
+        if (charge.Status != ScheduledChargeStatus.Pending)
+        {
+            Notify("Solo se pueden pagar cobros pendientes.", true);
             return;
         }
 
@@ -333,6 +478,7 @@ internal class ChargesView : ViewBase
             return;
         }
 
+        using var operation = BeginOperation();
         var result = await Context.Services.Payments.RegisterAsync(
             new RegisterPaymentRequest(
                 charge.Id,
@@ -350,9 +496,15 @@ internal class ChargesView : ViewBase
 
     private async Task AdjustAsync()
     {
-        if (Ui.Selected<ScheduledCharge>(_pendingGrid) is not { } charge)
+        if (Ui.Selected<ScheduledCharge>(_chargesGrid) is not { } charge)
         {
             Notify("Selecciona un cobro pendiente.", true);
+            return;
+        }
+
+        if (charge.Status != ScheduledChargeStatus.Pending)
+        {
+            Notify("Solo se pueden ajustar cobros pendientes.", true);
             return;
         }
 
@@ -368,6 +520,7 @@ internal class ChargesView : ViewBase
             return;
         }
 
+        using var operation = BeginOperation();
         var result = await Context.Services.Charges.AdjustAmountAsync(
             new AdjustChargeAmountRequest(charge.Id, Format.Cents(amount.Value)));
 
@@ -382,9 +535,15 @@ internal class ChargesView : ViewBase
 
     private async Task CancelChargeAsync()
     {
-        if (Ui.Selected<ScheduledCharge>(_pendingGrid) is not { } charge)
+        if (Ui.Selected<ScheduledCharge>(_chargesGrid) is not { } charge)
         {
             Notify("Selecciona un cobro pendiente.", true);
+            return;
+        }
+
+        if (charge.Status != ScheduledChargeStatus.Pending)
+        {
+            Notify("Solo se pueden anular cobros pendientes. Si existe un pago vigente, anúlalo primero.", true);
             return;
         }
 
@@ -400,6 +559,7 @@ internal class ChargesView : ViewBase
             return;
         }
 
+        using var operation = BeginOperation();
         var result = await Context.Services.Charges.CancelAsync(charge.Id);
 
         if (Failed(result))
@@ -429,6 +589,7 @@ internal class ChargesView : ViewBase
             return;
         }
 
+        using var operation = BeginOperation();
         var subscriptions = await Context.Services.Subscriptions.GetAllAsync();
         if (Failed(subscriptions))
         {
@@ -436,6 +597,7 @@ internal class ChargesView : ViewBase
         }
 
         var created = 0;
+        var failures = new List<string>();
         var limit = DateOnly.FromDateTime(until.Value);
         foreach (var sub in subscriptions.Value.Where(s => s.IsActive))
         {
@@ -444,10 +606,20 @@ internal class ChargesView : ViewBase
             {
                 created += res.Value.Count;
             }
+            else
+            {
+                failures.Add($"{sub.Name}: {Describe(res.Errors)}");
+            }
         }
 
-        Notify(created == 0 ? "No había cobros nuevos por generar." : $"{created} cobros generados.");
-        await DataChangedAsync(DataChangeKind.Charges);
+        var message = created == 0 ? "No había cobros nuevos por generar." : $"{created} cobros generados.";
+        if (failures.Count > 0)
+        {
+            message += $" No se completaron {failures.Count} suscripciones: {string.Join(" · ", failures)}";
+        }
+
+        Notify(message, failures.Count > 0);
+        await DataChangedAsync(DataChangeKind.Subscriptions | DataChangeKind.Charges);
     }
 
     private async Task CancelPaymentAsync()
@@ -455,6 +627,12 @@ internal class ChargesView : ViewBase
         if (Ui.Selected<Payment>(_paymentsGrid) is not { } payment)
         {
             Notify("Selecciona un pago registrado.", true);
+            return;
+        }
+
+        if (payment.Status == PaymentStatus.Cancelled)
+        {
+            Notify("Este pago ya está anulado. Su historial se conserva.", true);
             return;
         }
 
@@ -477,6 +655,7 @@ internal class ChargesView : ViewBase
             return;
         }
 
+        using var operation = BeginOperation();
         var result = await Context.Services.Payments.CancelAsync(
             new CancelPaymentRequest(payment.Id, reason.Text.Trim()));
 
@@ -487,5 +666,48 @@ internal class ChargesView : ViewBase
 
         Notify("Pago anulado.");
         await DataChangedAsync(DataChangeKind.Payments | DataChangeKind.Charges);
+    }
+
+    private async Task ShowPaymentDetailsAsync()
+    {
+        if (Ui.Selected<Payment>(_paymentsGrid) is not { } selected)
+        {
+            Notify("Selecciona un pago para consultar sus detalles.", true);
+            return;
+        }
+
+        var result = await Context.Services.Payments.GetByIdAsync(selected.Id);
+        if (Failed(result))
+        {
+            return;
+        }
+
+        var payment = result.Value;
+        var hasCharge = _chargesById.TryGetValue(payment.ScheduledChargeId, out var charge);
+        var subscriptionName = hasCharge
+            && _names.TryGetValue(charge!.SubscriptionId, out var name)
+                ? name
+                : "No disponible";
+        var chargeDescription = hasCharge
+            ? $"{subscriptionName} · vencimiento {Format.Date(charge!.ScheduledDate)}"
+            : "Cobro relacionado no disponible";
+        var details = new[]
+        {
+            new[] { "Fecha de pago", Format.Date(payment.PaymentDate) },
+            new[] { "Importe", Format.Currency(payment.AmountCents) },
+            new[] { "Método", "No registrado en SubTrack 1.0" },
+            new[] { "Cobro relacionado", chargeDescription },
+            new[] { "Comprobante", payment.VoucherNumber },
+            new[] { "Estado", Format.PaymentStatus(payment.Status) },
+            new[] { "Anulado en", payment.CancelledAt is { } cancelledAt ? Format.Stamp(cancelledAt) : "—" },
+            new[] { "Motivo de anulación", payment.CancellationReason ?? "—" }
+        };
+
+        TableView.Show(
+            FindForm(),
+            "Detalles del pago",
+            $"{subscriptionName} · {payment.VoucherNumber}",
+            new[] { ("Dato", 32f), ("Detalle", 68f) },
+            details);
     }
 }

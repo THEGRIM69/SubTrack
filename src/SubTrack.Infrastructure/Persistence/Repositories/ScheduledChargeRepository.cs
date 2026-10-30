@@ -86,6 +86,17 @@ internal sealed class ScheduledChargeRepository
         return await ReadListAsync(command, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<IReadOnlyList<ScheduledCharge>> GetAllAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand(
+            null,
+            $"{SelectCharges} ORDER BY fecha_programada ASC, creado_en ASC;");
+
+        return await ReadListAsync(command, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<IReadOnlyList<ScheduledCharge>> GetPendingAsync(
         SqliteConnection connection,
         CancellationToken cancellationToken)
@@ -93,6 +104,26 @@ internal sealed class ScheduledChargeRepository
         await using var command = connection.CreateCommand(
             null,
             $"{SelectCharges} WHERE estado = 'PENDIENTE' ORDER BY fecha_programada ASC;");
+
+        return await ReadListAsync(command, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<ScheduledCharge>> GetUpcomingPendingAsync(
+        SqliteConnection connection,
+        DateOnly from,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection
+            .CreateCommand(
+                null,
+                $"""
+                {SelectCharges}
+                WHERE estado = 'PENDIENTE' AND fecha_programada >= $desde
+                ORDER BY fecha_programada ASC, creado_en ASC
+                LIMIT $limite;
+                """)
+            .WithParameters(("$desde", from.ToStorage()), ("$limite", limit));
 
         return await ReadListAsync(command, cancellationToken).ConfigureAwait(false);
     }

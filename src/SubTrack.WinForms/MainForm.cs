@@ -298,7 +298,9 @@ public sealed class MainForm : Form
                         || change.HasFlag(DataChangeKind.Expenses)
                         || change.HasFlag(DataChangeKind.Incomes)
                         || change.HasFlag(DataChangeKind.OpeningBalance),
-                    "Suscripciones" => change.HasFlag(DataChangeKind.Subscriptions),
+                    "Suscripciones" => change.HasFlag(DataChangeKind.Subscriptions)
+                        || change.HasFlag(DataChangeKind.Charges)
+                        || change.HasFlag(DataChangeKind.Payments),
                     "Cobros" => change.HasFlag(DataChangeKind.Charges) || change.HasFlag(DataChangeKind.Subscriptions),
                     "Pagos" => change.HasFlag(DataChangeKind.Payments),
                     "Gastos" => change.HasFlag(DataChangeKind.Expenses),

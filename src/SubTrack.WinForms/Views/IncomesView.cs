@@ -328,6 +328,8 @@ internal sealed class IncomesView : ViewBase
             new Control[]
             {
                 Ui.Action("Nueva plantilla", NewTemplateAsync, ButtonKind.Primary),
+                Ui.Action("Editar plantilla", EditTemplateAsync),
+                Ui.Action("Activar / desactivar", ToggleTemplateAsync),
                 Ui.Action("Generar previstos", GenerateTemplateAsync)
             });
 
@@ -718,6 +720,7 @@ internal sealed class IncomesView : ViewBase
         var day = dialog.AddNumber("Día de cobro", DateTime.Today.Day, 1, 31);
         var start = dialog.AddDate("Inicio", DateTime.Today);
 
+        frequency.SelectedIndexChanged += (_, _) => NormalizeTemplateDay(frequency, day);
         dialog.AddNote("En frecuencia quincenal el día debe ser 15 o 31 (31 = último día del mes).");
 
         if (dialog.ShowDialog(FindForm()) != DialogResult.OK)
@@ -751,11 +754,76 @@ internal sealed class IncomesView : ViewBase
         await DataChangedAsync(DataChangeKind.Incomes);
     }
 
+    private async Task EditTemplateAsync()
+    {
+        if (SelectedTemplate() is not { } template)
+        {
+            return;
+        }
+
+        using var dialog = new FormDialog(
+            "Editar plantilla",
+            "Los ingresos ya generados conservan sus datos; los cambios aplican a los próximos.",
+            "Guardar cambios");
+
+        var concept = dialog.AddText("Concepto", template.Concept);
+        var amount = dialog.AddMoney("Importe", template.AmountCents / 100m);
+        var frequency = dialog.AddCombo("Frecuencia", TemplateTypes, template.Frequency);
+        var day = dialog.AddNumber("Día de cobro", template.AnchorDay, 1, 31);
+        var start = dialog.AddDate("Inicio", template.StartDate.ToDateTime(TimeOnly.MinValue));
+
+        frequency.SelectedIndexChanged += (_, _) => NormalizeTemplateDay(frequency, day);
+        dialog.AddNote("En frecuencia quincenal el día debe ser 15 o 31 (31 = último día del mes).");
+
+        if (dialog.ShowDialog(FindForm()) != DialogResult.OK)
+        {
+            return;
+        }
+
+        var result = await Context.Services.Incomes.UpdateTemplateAsync(
+            new UpdateIncomeTemplateRequest(
+                template.Id,
+                concept.Text.Trim(),
+                Format.Cents(amount.Value),
+                FormDialog.Value<IncomeType>(frequency),
+                (int)day.Value,
+                DateOnly.FromDateTime(start.Value)));
+
+        if (Failed(result))
+        {
+            return;
+        }
+
+        Notify("Plantilla actualizada. Los ingresos ya generados no se modificaron.");
+        await DataChangedAsync(DataChangeKind.Incomes);
+    }
+
+    private async Task ToggleTemplateAsync()
+    {
+        if (SelectedTemplate() is not { } template)
+        {
+            return;
+        }
+
+        var isActive = !template.IsActive;
+        var result = await Context.Services.Incomes.SetTemplateActiveAsync(
+            new SetIncomeTemplateActiveRequest(template.Id, isActive));
+
+        if (Failed(result))
+        {
+            return;
+        }
+
+        Notify(isActive
+            ? "Plantilla activada."
+            : "Plantilla desactivada. Los ingresos ya generados se conservan.");
+        await DataChangedAsync(DataChangeKind.Incomes);
+    }
+
     private async Task GenerateTemplateAsync()
     {
-        if (Ui.Selected<RecurringIncomeTemplate>(_templatesGrid) is not { } template)
+        if (SelectedTemplate() is not { } template)
         {
-            Notify("Selecciona una plantilla.", true);
             return;
         }
 
@@ -793,6 +861,27 @@ internal sealed class IncomesView : ViewBase
             : $"{result.Value.Count} ingresos previstos generados.");
 
         await DataChangedAsync(DataChangeKind.Incomes);
+    }
+
+    private RecurringIncomeTemplate? SelectedTemplate()
+    {
+        var template = Ui.Selected<RecurringIncomeTemplate>(_templatesGrid);
+
+        if (template is null)
+        {
+            Notify("Selecciona una plantilla.", true);
+        }
+
+        return template;
+    }
+
+    private static void NormalizeTemplateDay(ComboBox frequency, NumericUpDown day)
+    {
+        if (FormDialog.Value<IncomeType>(frequency) == IncomeType.Biweekly
+            && day.Value is not (15 or 31))
+        {
+            day.Value = 15;
+        }
     }
 
     private Income? Selected()

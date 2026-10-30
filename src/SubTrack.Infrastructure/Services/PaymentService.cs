@@ -221,11 +221,19 @@ internal sealed class PaymentService : IPaymentService
 
             if (charge is not null)
             {
+                var hasRemainingActivePayment = await _payments.HasActivePaymentForChargeAsync(
+                    connection,
+                    transaction,
+                    charge.Id,
+                    cancellationToken).ConfigureAwait(false);
+
                 await _charges.UpdateStatusAsync(
                     connection,
                     transaction,
                     charge.Id,
-                    ScheduledChargeStatus.Pending,
+                    hasRemainingActivePayment
+                        ? ScheduledChargeStatus.Paid
+                        : ScheduledChargeStatus.Pending,
                     now,
                     cancellationToken).ConfigureAwait(false);
 
@@ -269,6 +277,34 @@ internal sealed class PaymentService : IPaymentService
         return payment is null
             ? Result<Payment>.Fail(ErrorCodes.PagoNoEncontrado, "El pago no existe.")
             : Result<Payment>.Ok(payment);
+    }
+
+    public async Task<Result<IReadOnlyList<Payment>>> GetByScheduledChargeIdAsync(
+        Guid scheduledChargeId,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _factory.OpenAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        var charge = await _charges.GetByIdAsync(
+            connection,
+            null,
+            scheduledChargeId,
+            cancellationToken).ConfigureAwait(false);
+
+        if (charge is null)
+        {
+            return Result<IReadOnlyList<Payment>>.Fail(
+                ErrorCodes.CobroNoEncontrado,
+                "El cobro no existe.");
+        }
+
+        var payments = await _payments.GetByScheduledChargeIdAsync(
+            connection,
+            scheduledChargeId,
+            cancellationToken).ConfigureAwait(false);
+
+        return Result<IReadOnlyList<Payment>>.Ok(payments);
     }
 
     public async Task<Result<PagedResult<Payment>>> GetHistoryAsync(

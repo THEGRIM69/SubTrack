@@ -102,6 +102,87 @@ public sealed class FinancialFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task CrearSuscripcion_ConObligacionInicialPasada_PersisteElCobroEnSqlite()
+    {
+        var services = await CreateServicesAsync();
+        var initialDate = Today.AddDays(-1);
+
+        var result = await services.Subscriptions.CreateAsync(
+            NewSubscription() with
+            {
+                InitialPendingCharges = [new InitialPendingCharge(initialDate, 12_500)]
+            });
+
+        Assert.True(result.IsSuccess, Describe(result));
+
+        var subscriptions = await services.Subscriptions.GetAllAsync();
+        var persistedSubscription = Assert.Single(subscriptions.Value);
+        Assert.Equal(result.Value.Id, persistedSubscription.Id);
+        Assert.Equal(initialDate, persistedSubscription.NextChargeDate);
+
+        var charges = await services.Charges.GetByRangeAsync(initialDate, initialDate);
+        var persistedCharge = Assert.Single(charges.Value);
+        Assert.Equal(result.Value.Id, persistedCharge.SubscriptionId);
+        Assert.Equal(12_500, persistedCharge.AmountCents);
+    }
+
+    [Fact]
+    public async Task CrearSuscripcion_ConObligacionDeHoy_RechazaSinGuardar()
+    {
+        var services = await CreateServicesAsync();
+
+        var result = await services.Subscriptions.CreateAsync(
+            NewSubscription() with
+            {
+                InitialPendingCharges = [new InitialPendingCharge(Today, 12_500)]
+            });
+
+        Assert.True(result.IsFailure);
+        Assert.Contains(result.Errors, error => error.Code == ErrorCodes.FechaAnteriorRequerida);
+
+        var subscriptions = await services.Subscriptions.GetAllAsync();
+        Assert.Empty(subscriptions.Value);
+    }
+
+    [Fact]
+    public async Task RegistrarCobroAnterior_PersisteElCobroYActualizaProximoCobro()
+    {
+        var services = await CreateServicesAsync();
+        var subscription = await CreateSubscriptionAsync(services);
+        var initialDate = Today.AddDays(-1);
+
+        var result = await services.Charges.RegisterInitialPendingAsync(
+            new RegisterInitialPendingChargeRequest(subscription.Id, initialDate, 12_500));
+
+        Assert.True(result.IsSuccess, Describe(result));
+
+        var persistedSubscription = await services.Subscriptions.GetByIdAsync(subscription.Id);
+        Assert.True(persistedSubscription.IsSuccess, Describe(persistedSubscription));
+        Assert.Equal(initialDate, persistedSubscription.Value.NextChargeDate);
+
+        var charges = await services.Charges.GetByRangeAsync(initialDate, initialDate);
+        var persistedCharge = Assert.Single(charges.Value);
+        Assert.Equal(result.Value.Id, persistedCharge.Id);
+        Assert.Equal(12_500, persistedCharge.AmountCents);
+    }
+
+    [Fact]
+    public async Task RegistrarCobroAnterior_ConFechaDeHoy_RechazaSinGuardar()
+    {
+        var services = await CreateServicesAsync();
+        var subscription = await CreateSubscriptionAsync(services);
+
+        var result = await services.Charges.RegisterInitialPendingAsync(
+            new RegisterInitialPendingChargeRequest(subscription.Id, Today, 12_500));
+
+        Assert.True(result.IsFailure);
+        Assert.Contains(result.Errors, error => error.Code == ErrorCodes.FechaAnteriorRequerida);
+
+        var charges = await services.Charges.GetByRangeAsync(Today, Today);
+        Assert.Empty(charges.Value);
+    }
+
+    [Fact]
     public async Task GenerarCobros_CreaSoloLosQueFaltan()
     {
         var services = await CreateServicesAsync();
@@ -126,6 +207,77 @@ public sealed class FinancialFlowTests : IDisposable
 
         Assert.True(again.IsSuccess, Describe(again));
         Assert.Empty(again.Value);
+    }
+
+    [Fact]
+    public async Task ConsultarCobros_DevuelveEstadosYPagosRelacionadosDesdeSqlite()
+    {
+        var services = await CreateServicesAsync();
+        var subscription = await CreateSubscriptionAsync(services);
+        await GenerateAsync(services, subscription.Id, new DateOnly(2026, 12, 31));
+
+        var paidCharge = await GetSingleChargeAsync(services, new DateOnly(2026, 10, 28));
+        var cancelledCharge = await GetSingleChargeAsync(services, new DateOnly(2026, 11, 28));
+        var chargeWithCancelledPayment = await GetSingleChargeAsync(services, new DateOnly(2026, 12, 28));
+
+        var paid = await services.Payments.RegisterAsync(
+            new RegisterPaymentRequest(paidCharge.Id, Today, Guid.NewGuid()));
+        var paymentToCancel = await services.Payments.RegisterAsync(
+            new RegisterPaymentRequest(chargeWithCancelledPayment.Id, Today, Guid.NewGuid()));
+
+        Assert.True(paid.IsSuccess, Describe(paid));
+        Assert.True(paymentToCancel.IsSuccess, Describe(paymentToCancel));
+
+        var cancelledPayment = await services.Payments.CancelAsync(
+            new CancelPaymentRequest(paymentToCancel.Value.Id, "Corrección de registro"));
+        Assert.True(cancelledPayment.IsSuccess, Describe(cancelledPayment));
+
+        var chargeCancellation = await services.Charges.CancelAsync(cancelledCharge.Id);
+        Assert.True(chargeCancellation.IsSuccess, Describe(chargeCancellation));
+
+        var all = await services.Charges.GetAllAsync();
+        Assert.True(all.IsSuccess, Describe(all));
+        Assert.Equal(3, all.Value.Count);
+        Assert.Equal(ScheduledChargeStatus.Paid,
+            Assert.Single(all.Value, charge => charge.Id == paidCharge.Id).Status);
+        Assert.Equal(ScheduledChargeStatus.Cancelled,
+            Assert.Single(all.Value, charge => charge.Id == cancelledCharge.Id).Status);
+        Assert.Equal(ScheduledChargeStatus.Pending,
+            Assert.Single(all.Value, charge => charge.Id == chargeWithCancelledPayment.Id).Status);
+
+        var relatedPayments = await services.Payments.GetByScheduledChargeIdAsync(chargeWithCancelledPayment.Id);
+        Assert.True(relatedPayments.IsSuccess, Describe(relatedPayments));
+        var storedPayment = Assert.Single(relatedPayments.Value);
+        Assert.Equal(paymentToCancel.Value.Id, storedPayment.Id);
+        Assert.Equal(PaymentStatus.Cancelled, storedPayment.Status);
+        Assert.Equal("Corrección de registro", storedPayment.CancellationReason);
+
+        var repeatedRead = await services.Charges.GetAllAsync();
+        Assert.Equal(all.Value.Count, repeatedRead.Value.Count);
+    }
+
+    [Fact]
+    public async Task ConsultarCobrosVencidos_UsaLaFechaIndicadaYConservaVinculoDeSuscripcion()
+    {
+        var services = await CreateServicesAsync();
+        var overdueDate = Today.AddDays(-1);
+        var subscription = await CreateSubscriptionAsync(
+            services,
+            NewSubscription() with
+            {
+                InitialPendingCharges = [new InitialPendingCharge(overdueDate, 12_500)]
+            });
+
+        var overdue = await services.Charges.GetOverdueAsync(Today);
+
+        Assert.True(overdue.IsSuccess, Describe(overdue));
+        var charge = Assert.Single(overdue.Value);
+        Assert.Equal(subscription.Id, charge.SubscriptionId);
+        Assert.Equal(overdueDate, charge.ScheduledDate);
+        Assert.Equal(ScheduledChargeStatus.Pending, charge.Status);
+
+        var notOverdue = await services.Charges.GetOverdueAsync(overdueDate);
+        Assert.Empty(notOverdue.Value);
     }
 
     [Fact]
@@ -163,6 +315,10 @@ public sealed class FinancialFlowTests : IDisposable
             new DateOnly(2026, 10, 31));
 
         Assert.Equal(ScheduledChargeStatus.Paid, Assert.Single(after.Value).Status);
+        var dashboard = await services.Dashboard.GetAsync(
+            new GetDashboardRequest(new DateOnly(2026, 10, 1)));
+        Assert.True(dashboard.IsSuccess, Describe(dashboard));
+        Assert.Equal(10_000, dashboard.Value.SubscriptionPaymentsCents);
 
         var updated = await services.Subscriptions.GetByIdAsync(subscription.Id);
 
@@ -243,6 +399,22 @@ public sealed class FinancialFlowTests : IDisposable
         var back = Assert.Single(pending.Value, item => item.Id == charge.Id);
 
         Assert.Equal(ScheduledChargeStatus.Pending, back.Status);
+
+        var paymentDetails = await services.Payments.GetByIdAsync(payment.Value.Id);
+        Assert.True(paymentDetails.IsSuccess, Describe(paymentDetails));
+        Assert.Equal(PaymentStatus.Cancelled, paymentDetails.Value.Status);
+        Assert.Equal("Se registró por error", paymentDetails.Value.CancellationReason);
+
+        var history = await services.Payments.GetHistoryAsync(new PageRequest(1, 10));
+        Assert.True(history.IsSuccess, Describe(history));
+        var retainedPayment = Assert.Single(history.Value.Items);
+        Assert.Equal(payment.Value.Id, retainedPayment.Id);
+        Assert.Equal(PaymentStatus.Cancelled, retainedPayment.Status);
+
+        var dashboard = await services.Dashboard.GetAsync(
+            new GetDashboardRequest(new DateOnly(2026, 10, 1)));
+        Assert.True(dashboard.IsSuccess, Describe(dashboard));
+        Assert.Equal(0, dashboard.Value.SubscriptionPaymentsCents);
 
         var updated = await services.Subscriptions.GetByIdAsync(subscription.Id);
         Assert.Equal(new DateOnly(2026, 10, 28), updated.Value.NextChargeDate);
@@ -402,6 +574,30 @@ public sealed class FinancialFlowTests : IDisposable
         Assert.Equal(2, versions.Value.Count);
         Assert.Equal(2, versions.Value[1].VersionNumber);
         Assert.Equal(14_000, versions.Value[1].AmountCents);
+    }
+
+    [Fact]
+    public async Task ModificarSuscripcion_ConFechaFutura_NoGeneraCobrosMasAllaDeDoceMeses()
+    {
+        var services = await CreateServicesAsync();
+        var subscription = await CreateSubscriptionAsync(services);
+        var effectiveFrom = Today.AddMonths(10);
+        var maxHorizon = Today.AddMonths(12);
+
+        var result = await services.Subscriptions.UpdateAsync(
+            new UpdateSubscriptionRequest(
+                subscription.Id,
+                "Netflix actualizado",
+                14_000,
+                AmountType.Fixed,
+                BillingFrequency.Monthly,
+                effectiveFrom));
+
+        Assert.True(result.IsSuccess, Describe(result));
+
+        var charges = await services.Charges.GetByRangeAsync(Today, Today.AddYears(2));
+        Assert.All(charges.Value, charge => Assert.True(charge.ScheduledDate <= maxHorizon));
+        Assert.Equal(2, charges.Value.Count);
     }
 
     [Fact]

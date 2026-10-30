@@ -30,6 +30,14 @@ internal static class DomainValidation
                 "AmountCents")
             : null;
 
+    public static DomainError? DateBeforeToday(DateOnly date, DateOnly today, string field) =>
+        date >= today
+            ? new DomainError(
+                ErrorCodes.FechaAnteriorRequerida,
+                "La fecha del cobro anterior debe ser anterior a hoy.",
+                field)
+            : null;
+
     public static DomainError? Reason(string? value) =>
         string.IsNullOrWhiteSpace(value)
             ? new DomainError(ErrorCodes.MotivoRequerido, "Debe indicar el motivo.", "Reason")

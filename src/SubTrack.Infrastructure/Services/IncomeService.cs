@@ -106,6 +106,121 @@ internal sealed class IncomeService : IIncomeService
         }
     }
 
+    public async Task<Result<RecurringIncomeTemplate>> UpdateTemplateAsync(
+        UpdateIncomeTemplateRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var errors = ValidateTemplate(
+            request.Concept,
+            request.AmountCents,
+            request.Frequency,
+            request.AnchorDay,
+            request.StartDate);
+
+        if (errors.Count > 0)
+        {
+            return Result<RecurringIncomeTemplate>.Fail(errors);
+        }
+
+        var now = _clock.UtcNow;
+
+        await using var connection = await _factory.OpenAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        await using var transaction = connection.BeginTransaction(deferred: false);
+
+        try
+        {
+            var existing = await _incomes.GetTemplateAsync(
+                connection,
+                transaction,
+                request.TemplateId,
+                cancellationToken).ConfigureAwait(false);
+
+            if (existing is null)
+            {
+                return Result<RecurringIncomeTemplate>.Fail(
+                    ErrorCodes.PlantillaNoEncontrada,
+                    "La plantilla de ingreso no existe.");
+            }
+
+            var updated = existing with
+            {
+                Concept = request.Concept.Trim(),
+                AmountCents = request.AmountCents,
+                Frequency = request.Frequency,
+                AnchorDay = request.AnchorDay,
+                StartDate = request.StartDate,
+                UpdatedAt = now
+            };
+
+            await _incomes.UpdateTemplateAsync(connection, transaction, updated, cancellationToken)
+                .ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+
+            return Result<RecurringIncomeTemplate>.Ok(updated);
+        }
+        catch (SqliteException exception)
+        {
+            await ServiceSupport.SafeRollbackAsync(transaction, cancellationToken)
+                .ConfigureAwait(false);
+
+            return Result<RecurringIncomeTemplate>.Fail(SqliteErrorTranslator.Translate(exception));
+        }
+    }
+
+    public async Task<Result<RecurringIncomeTemplate>> SetTemplateActiveAsync(
+        SetIncomeTemplateActiveRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var now = _clock.UtcNow;
+
+        await using var connection = await _factory.OpenAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        await using var transaction = connection.BeginTransaction(deferred: false);
+
+        try
+        {
+            var template = await _incomes.GetTemplateAsync(
+                connection,
+                transaction,
+                request.TemplateId,
+                cancellationToken).ConfigureAwait(false);
+
+            if (template is null)
+            {
+                return Result<RecurringIncomeTemplate>.Fail(
+                    ErrorCodes.PlantillaNoEncontrada,
+                    "La plantilla de ingreso no existe.");
+            }
+
+            if (template.IsActive != request.IsActive)
+            {
+                await _incomes.SetTemplateActiveAsync(
+                    connection,
+                    transaction,
+                    template.Id,
+                    request.IsActive,
+                    now,
+                    cancellationToken).ConfigureAwait(false);
+
+                template = template with { IsActive = request.IsActive, UpdatedAt = now };
+            }
+
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+
+            return Result<RecurringIncomeTemplate>.Ok(template);
+        }
+        catch (SqliteException exception)
+        {
+            await ServiceSupport.SafeRollbackAsync(transaction, cancellationToken)
+                .ConfigureAwait(false);
+
+            return Result<RecurringIncomeTemplate>.Fail(SqliteErrorTranslator.Translate(exception));
+        }
+    }
+
     public async Task<Result<IReadOnlyList<RecurringIncomeTemplate>>> GetTemplatesAsync(
         bool includeInactive,
         CancellationToken cancellationToken = default)
@@ -164,7 +279,7 @@ internal sealed class IncomeService : IIncomeService
             if (!template.IsActive)
             {
                 return Result<IReadOnlyList<Income>>.Fail(
-                    ErrorCodes.PlantillaNoEncontrada,
+                    ErrorCodes.PlantillaInactiva,
                     "La plantilla de ingreso está desactivada.");
             }
 
@@ -678,20 +793,35 @@ internal sealed class IncomeService : IIncomeService
     }
 
     private static List<DomainError> ValidateTemplate(CreateIncomeTemplateRequest request)
+        => ValidateTemplate(
+            request.Concept,
+            request.AmountCents,
+            request.Frequency,
+            request.AnchorDay,
+            request.StartDate,
+            request.OperationId);
+
+    private static List<DomainError> ValidateTemplate(
+        string concept,
+        long amountCents,
+        IncomeType frequency,
+        int anchorDay,
+        DateOnly startDate,
+        Guid? operationId = null)
     {
         var errors = new List<DomainError>();
 
-        if (DomainValidation.Name(request.Concept) is { } conceptError)
+        if (DomainValidation.Name(concept) is { } conceptError)
         {
             errors.Add(conceptError);
         }
 
-        if (DomainValidation.Amount(request.AmountCents) is { } amountError)
+        if (DomainValidation.Amount(amountCents) is { } amountError)
         {
             errors.Add(amountError);
         }
 
-        if (request.Frequency is not (IncomeType.Monthly or IncomeType.Biweekly))
+        if (frequency is not (IncomeType.Monthly or IncomeType.Biweekly))
         {
             errors.Add(new DomainError(
                 ErrorCodes.EstadoInicialInvalido,
@@ -699,16 +829,16 @@ internal sealed class IncomeService : IIncomeService
                 "Frequency"));
         }
 
-        var anchorError = request.Frequency == IncomeType.Biweekly
-            ? DomainValidation.BiweeklyAnchorDay(request.AnchorDay)
-            : DomainValidation.AnchorDay(request.AnchorDay);
+        var anchorError = frequency == IncomeType.Biweekly
+            ? DomainValidation.BiweeklyAnchorDay(anchorDay)
+            : DomainValidation.AnchorDay(anchorDay);
 
         if (anchorError is not null)
         {
             errors.Add(anchorError);
         }
 
-        if (request.StartDate == default)
+        if (startDate == default)
         {
             errors.Add(new DomainError(
                 ErrorCodes.FechaRequerida,
@@ -716,7 +846,7 @@ internal sealed class IncomeService : IIncomeService
                 "StartDate"));
         }
 
-        if (request.OperationId == Guid.Empty)
+        if (operationId == Guid.Empty)
         {
             errors.Add(new DomainError(
                 ErrorCodes.OperacionInvalida,

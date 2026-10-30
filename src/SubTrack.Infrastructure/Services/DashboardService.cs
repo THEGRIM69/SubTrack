@@ -84,10 +84,11 @@ internal sealed class DashboardService : IDashboardService
             CumulativeExpensesCents: cumulativeExpenses,
             CumulativePaymentsCents: cumulativePayments);
 
-        var upcoming = futureFrom <= last
-            ? await _charges.GetPendingInRangeAsync(connection, futureFrom, last, cancellationToken)
-                .ConfigureAwait(false)
-            : Array.Empty<SubTrack.Core.Domain.Entities.ScheduledCharge>();
+        var upcoming = await _charges.GetUpcomingPendingAsync(
+            connection,
+            today,
+            limit: 10,
+            cancellationToken).ConfigureAwait(false);
 
         var overdue = await _charges.GetOverdueAsync(connection, today, cancellationToken)
             .ConfigureAwait(false);

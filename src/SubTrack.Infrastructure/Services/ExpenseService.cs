@@ -183,7 +183,7 @@ internal sealed class ExpenseService : IExpenseService
                     "La categoría seleccionada no existe.");
             }
 
-            if (!category.IsActive)
+            if (!category.IsActive && category.Id != expense.CategoryId)
             {
                 return Result<Expense>.Fail(
                     ErrorCodes.CategoriaInactiva,

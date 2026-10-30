@@ -18,6 +18,9 @@ public interface IScheduledChargeService
         DateOnly to,
         CancellationToken cancellationToken = default);
 
+    Task<Result<IReadOnlyList<ScheduledCharge>>> GetAllAsync(
+        CancellationToken cancellationToken = default);
+
     Task<Result<IReadOnlyList<ScheduledCharge>>> GetPendingAsync(
         CancellationToken cancellationToken = default);
 
