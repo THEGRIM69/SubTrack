@@ -17,6 +17,13 @@ internal sealed class SubscriptionsView : UserControl
     private readonly Label _countBadge;
     private readonly EmptyStateView _emptyState;
     private readonly Button _newSubscriptionButton;
+    private readonly TextBox _searchBox = new()
+    {
+        AccessibleName = "Buscar suscripciones",
+        Font = AppTheme.SearchFont,
+        BorderStyle = BorderStyle.None,
+        Margin = Padding.Empty
+    };
 
     public SubscriptionsView()
     {
@@ -27,6 +34,8 @@ internal sealed class SubscriptionsView : UserControl
 
         _heading = CreateHeading(out _newSubscriptionButton);
         _newSubscriptionButton.Click += (_, _) => OpenNewSubscriptionDialog();
+        _searchBox.TextChanged += (_, _) => RefreshView();
+        Native.Cue(_searchBox, "Buscar suscripción");
 
         _metrics =
         [
@@ -186,19 +195,28 @@ internal sealed class SubscriptionsView : UserControl
         _listTable.Controls.Clear();
         _listTable.RowStyles.Clear();
 
-        _countBadge.Text = _subscriptions.Count == 1 ? "1 suscripción" : $"{_subscriptions.Count} suscripciones";
+        List<SubscriptionViewModel> visibleSubscriptions = _subscriptions
+            .Where(subscription =>
+                subscription.Nombre.Contains(_searchBox.Text.Trim(), StringComparison.OrdinalIgnoreCase) ||
+                subscription.Categoria.Contains(_searchBox.Text.Trim(), StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        _countBadge.Text = visibleSubscriptions.Count == _subscriptions.Count
+            ? $"{_subscriptions.Count} suscripciones"
+            : $"{visibleSubscriptions.Count} de {_subscriptions.Count}";
 
         // Row 0: Section Title Panel
         _listTable.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(48)));
         var titlePanel = new TableLayoutPanel
         {
             BackColor = AppTheme.Surface,
-            ColumnCount = 2,
+            ColumnCount = 3,
             Dock = DockStyle.Fill,
             Margin = Padding.Empty,
             Padding = new Padding(18, 0, 18, 0)
         };
         titlePanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        titlePanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 220F));
         titlePanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         titlePanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
 
@@ -212,7 +230,8 @@ internal sealed class SubscriptionsView : UserControl
             TextAlign = ContentAlignment.MiddleLeft
         };
         titlePanel.Controls.Add(sectionTitle, 0, 0);
-        titlePanel.Controls.Add(_countBadge, 1, 0);
+        titlePanel.Controls.Add(_searchBox, 1, 0);
+        titlePanel.Controls.Add(_countBadge, 2, 0);
         _listTable.Controls.Add(titlePanel, 0, 0);
 
         // Row 1: Columns Header
@@ -243,9 +262,9 @@ internal sealed class SubscriptionsView : UserControl
 
         // Rows 2..N+1: Subscription items
         int rowHeight = ScaleLogical(54);
-        for (int i = 0; i < _subscriptions.Count; i++)
+        for (int i = 0; i < visibleSubscriptions.Count; i++)
         {
-            SubscriptionViewModel sub = _subscriptions[i];
+            SubscriptionViewModel sub = visibleSubscriptions[i];
             _listTable.RowStyles.Add(new RowStyle(SizeType.Absolute, rowHeight));
 
             var rowControl = new SubscriptionRowControl(sub);
@@ -255,7 +274,7 @@ internal sealed class SubscriptionsView : UserControl
             _listTable.Controls.Add(rowControl, 0, i + 2);
         }
 
-        _listTable.RowCount = 2 + _subscriptions.Count;
+        _listTable.RowCount = 2 + visibleSubscriptions.Count;
         _listTable.ResumeLayout(true);
     }
 

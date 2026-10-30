@@ -158,17 +158,10 @@ internal sealed class SubscriptionRowControl : UserControl
             _ => Color.FromArgb(237, 239, 243)
         };
 
-        _statusBadge = new Label
+        _statusBadge = new Pill(subscription.EstadoTexto, statusBackground, statusForeground)
         {
             Anchor = AnchorStyles.Right,
-            AutoSize = true,
-            BackColor = statusBackground,
-            Font = AppTheme.CaptionBoldFont,
-            ForeColor = statusForeground,
-            Margin = Padding.Empty,
-            Padding = new Padding(8, 4, 8, 4),
-            Text = subscription.EstadoTexto,
-            TextAlign = ContentAlignment.MiddleCenter
+            Margin = Padding.Empty
         };
         statusHost.Controls.Add(_statusBadge, 0, 1);
 
@@ -184,42 +177,26 @@ internal sealed class SubscriptionRowControl : UserControl
             WrapContents = false
         };
 
-        _detailButton = new Button
+        _detailButton = new FlatButton("Detalle", ButtonKind.Secondary)
         {
             AccessibleName = $"Ver detalles de {subscription.Nombre}",
-            BackColor = AppTheme.PrimarySoft,
-            Cursor = Cursors.Hand,
-            FlatStyle = FlatStyle.Flat,
-            Font = AppTheme.CaptionBoldFont,
-            ForeColor = AppTheme.Primary,
             Height = 28,
             Margin = new Padding(0, 0, 6, 0),
+            MinimumSize = new Size(62, 28),
             TabStop = true,
-            Text = "Detalle",
-            UseVisualStyleBackColor = false,
             Width = 62
         };
-        _detailButton.FlatAppearance.BorderSize = 0;
         _detailButton.Click += (_, _) => DetailRequested?.Invoke(this, _subscription);
 
-        _editButton = new Button
+        _editButton = new FlatButton("Editar", ButtonKind.Ghost)
         {
             AccessibleName = $"Editar suscripción {subscription.Nombre}",
-            BackColor = AppTheme.Surface,
-            Cursor = Cursors.Hand,
-            FlatStyle = FlatStyle.Flat,
-            Font = AppTheme.CaptionBoldFont,
-            ForeColor = AppTheme.TextPrimary,
             Height = 28,
             Margin = Padding.Empty,
+            MinimumSize = new Size(56, 28),
             TabStop = true,
-            Text = "Editar",
-            UseVisualStyleBackColor = false,
             Width = 56
         };
-        _editButton.FlatAppearance.BorderColor = AppTheme.Border;
-        _editButton.FlatAppearance.BorderSize = 1;
-        _editButton.FlatAppearance.MouseOverBackColor = AppTheme.NavigationHover;
         _editButton.Click += (_, _) => EditRequested?.Invoke(this, _subscription);
 
         actionsHost.Controls.Add(_detailButton);
