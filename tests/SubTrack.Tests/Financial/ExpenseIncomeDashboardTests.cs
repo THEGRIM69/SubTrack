@@ -648,6 +648,105 @@ public sealed class ExpenseIncomeDashboardTests : IDisposable
     }
 
     [Fact]
+    public async Task SaldoInicial_CorregirYLimpiarSustituyeImporteYConservaMovimientos()
+    {
+        var services = await CreateServicesAsync();
+        var startDate = new DateOnly(2026, 10, 1);
+
+        var opening = await services.OpeningBalance.SetAsync(
+            new SetOpeningBalanceRequest(100_000, startDate));
+        Assert.True(opening.IsSuccess, Describe(opening));
+
+        var income = await services.Incomes.CreateAsync(
+            new CreateIncomeRequest(
+                "Ingreso existente",
+                50_000,
+                IncomeType.Extraordinary,
+                null,
+                Today,
+                null,
+                Guid.NewGuid()));
+        Assert.True(income.IsSuccess, Describe(income));
+
+        var expense = await services.Expenses.CreateAsync(
+            new CreateExpenseRequest(
+                "Gasto existente",
+                Food,
+                10_000,
+                Today,
+                Today,
+                Guid.NewGuid()));
+        Assert.True(expense.IsSuccess, Describe(expense));
+
+        var subscription = await services.Subscriptions.CreateAsync(
+            new CreateSubscriptionRequest(
+                "Suscripción existente",
+                10_000,
+                AmountType.Fixed,
+                BillingFrequency.Monthly,
+                Today,
+                Guid.NewGuid()));
+        Assert.True(subscription.IsSuccess, Describe(subscription));
+
+        var charges = await services.Charges.GenerateAsync(
+            new GenerateChargesRequest(subscription.Value.Id, Today));
+        Assert.True(charges.IsSuccess, Describe(charges));
+        var charge = Assert.Single(charges.Value);
+
+        var payment = await services.Payments.RegisterAsync(
+            new RegisterPaymentRequest(charge.Id, Today, Guid.NewGuid()));
+        Assert.True(payment.IsSuccess, Describe(payment));
+
+        var initialDashboard = await services.Dashboard.GetAsync(new GetDashboardRequest(Month));
+        Assert.True(initialDashboard.IsSuccess, Describe(initialDashboard));
+        Assert.Equal(130_000, initialDashboard.Value.CurrentBalanceCents);
+
+        var corrected = await services.OpeningBalance.CorrectAsync(
+            new CorrectOpeningBalanceRequest(80_000, startDate));
+        Assert.True(corrected.IsSuccess, Describe(corrected));
+        Assert.Equal(80_000, corrected.Value.AmountCents);
+
+        var correctedDashboard = await services.Dashboard.GetAsync(new GetDashboardRequest(Month));
+        Assert.True(correctedDashboard.IsSuccess, Describe(correctedDashboard));
+        Assert.Equal(80_000, correctedDashboard.Value.OpeningBalanceCents);
+        Assert.Equal(50_000, correctedDashboard.Value.IncomeCents);
+        Assert.Equal(10_000, correctedDashboard.Value.ExpensesCents);
+        Assert.Equal(10_000, correctedDashboard.Value.SubscriptionPaymentsCents);
+        Assert.Equal(110_000, correctedDashboard.Value.CurrentBalanceCents);
+
+        var correctedAgain = await services.OpeningBalance.CorrectAsync(
+            new CorrectOpeningBalanceRequest(70_000, startDate));
+        Assert.True(correctedAgain.IsSuccess, Describe(correctedAgain));
+
+        var correctedAgainDashboard = await services.Dashboard.GetAsync(new GetDashboardRequest(Month));
+        Assert.True(correctedAgainDashboard.IsSuccess, Describe(correctedAgainDashboard));
+        Assert.Equal(100_000, correctedAgainDashboard.Value.CurrentBalanceCents);
+
+        var cleared = await services.OpeningBalance.CorrectAsync(
+            new CorrectOpeningBalanceRequest(0, startDate));
+        Assert.True(cleared.IsSuccess, Describe(cleared));
+        Assert.Equal(0, cleared.Value.AmountCents);
+
+        var clearedDashboard = await services.Dashboard.GetAsync(new GetDashboardRequest(Month));
+        Assert.True(clearedDashboard.IsSuccess, Describe(clearedDashboard));
+        Assert.Equal(0, clearedDashboard.Value.OpeningBalanceCents);
+        Assert.Equal(50_000, clearedDashboard.Value.IncomeCents);
+        Assert.Equal(10_000, clearedDashboard.Value.ExpensesCents);
+        Assert.Equal(10_000, clearedDashboard.Value.SubscriptionPaymentsCents);
+        Assert.Equal(30_000, clearedDashboard.Value.CurrentBalanceCents);
+
+        var corrections = await services.OpeningBalance.GetCorrectionsAsync();
+        Assert.True(corrections.IsSuccess, Describe(corrections));
+        Assert.Equal(3, corrections.Value.Count);
+        Assert.Contains(corrections.Value, item =>
+            item.PreviousAmountCents == 100_000 && item.NewAmountCents == 80_000);
+        Assert.Contains(corrections.Value, item =>
+            item.PreviousAmountCents == 80_000 && item.NewAmountCents == 70_000);
+        Assert.Contains(corrections.Value, item =>
+            item.PreviousAmountCents == 70_000 && item.NewAmountCents == 0);
+    }
+
+    [Fact]
     public async Task Dashboard_IntegraSaldoIngresosGastosYCobrosPendientes()
     {
         var services = await CreateServicesAsync();

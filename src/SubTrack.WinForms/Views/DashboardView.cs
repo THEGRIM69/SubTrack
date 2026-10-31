@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using SubTrack.Core.Contracts;
 using SubTrack.Core.Domain.Entities;
 using SubTrack.Core.Domain.Enums;
@@ -12,7 +13,7 @@ internal sealed class DashboardView : ViewBase
 
     private readonly Label _balance = ValueLabel(28f, FontStyle.Bold, Color.White);
     private readonly Label _balanceHint = Hint(8.5f, Color.FromArgb(146, 158, 168));
-    private readonly Label _projected = ValueLabel(19f, FontStyle.Bold, Palette.Text);
+    private readonly Label _projected = ValueLabel(28f, FontStyle.Bold, Palette.Text);
     private readonly Label _projectedHint = Hint(8.5f, Palette.Muted);
     private readonly Label _active = ValueLabel(26f, FontStyle.Bold, Palette.Text);
     private readonly Label _activeHint = Hint(8.5f, Palette.Muted);
@@ -31,9 +32,30 @@ internal sealed class DashboardView : ViewBase
     private readonly BarsChart _chart = new();
     private readonly Label _chartEmpty = Hint(9f, Palette.Muted, "No hay movimientos confirmados en los últimos 6 meses.");
     private readonly Label _summaryFigures = Ui.Label("Cargando datos...", 8.5f, Palette.Muted);
+    private readonly Label _summaryBalance = Ui.Label("Saldo disponible — · Ahorro proyectado —", 8.5f, Palette.Muted);
     private readonly Panel _contentPanel = new() { Dock = DockStyle.Fill, BackColor = Palette.Canvas };
-    private Control? _overviewPanel;
+    private readonly DashboardScrollPanel _dashboardScrollHost = new()
+    {
+        Dock = DockStyle.Fill,
+        AutoScroll = true,
+        BackColor = Palette.Canvas
+    };
+    private readonly TableLayoutPanel _dashboardLayout = new()
+    {
+        BackColor = Palette.Canvas,
+        Margin = new Padding(0),
+        Padding = new Padding(0)
+    };
+    private Control? _dashboardPanel;
     private Control? _summaryPanel;
+    private Control? _dashboardMainPanel;
+    private TableLayoutPanel? _dashboardMainLayout;
+    private Card? _balanceCard;
+    private Card? _projectedCard;
+    private Card? _subscriptionsCard;
+    private TableLayoutPanel? _subscriptionsLayout;
+    private DashboardScrollPanel? _sidebarPanel;
+    private TableLayoutPanel? _sidebarContent;
     private Button? _summaryToggle;
 
     private Dictionary<Guid, string> _names = new();
@@ -58,15 +80,13 @@ internal sealed class DashboardView : ViewBase
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 4,
+            RowCount = 2,
             BackColor = Palette.Canvas,
             Margin = new Padding(0),
             Padding = new Padding(0)
         };
 
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 178));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 110));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         root.Controls.Add(
@@ -81,14 +101,12 @@ internal sealed class DashboardView : ViewBase
             0,
             0);
 
-        root.Controls.Add(BuildHero(), 0, 1);
-        root.Controls.Add(BuildKpis(), 0, 2);
-        _overviewPanel = BuildOverview();
+        _dashboardPanel = BuildDashboardPanel();
         _summaryPanel = BuildSummaryPanel();
         _summaryPanel.Visible = false;
         _contentPanel.Controls.Add(_summaryPanel);
-        _contentPanel.Controls.Add(_overviewPanel);
-        root.Controls.Add(_contentPanel, 0, 3);
+        _contentPanel.Controls.Add(_dashboardPanel);
+        root.Controls.Add(_contentPanel, 0, 1);
 
         Ui.Align(_upcoming, "Importe");
         Ui.Align(_overdue, "Importe");
@@ -143,6 +161,8 @@ internal sealed class DashboardView : ViewBase
         _total.Text = Format.Money(snapshot.TotalExpensesCents);
         _summaryFigures.Text =
             $"Ingresos {Format.Money(snapshot.IncomeCents)} · Gastos {Format.Money(snapshot.ExpensesCents)} · Suscripciones {Format.Money(snapshot.SubscriptionPaymentsCents)} · Egresos {Format.Money(snapshot.TotalExpensesCents)}";
+        _summaryBalance.Text =
+            $"Saldo disponible {Format.Currency(snapshot.CurrentBalanceCents)} · Ahorro proyectado {Format.Currency(snapshot.ProjectedSavingsCents)}";
 
         Fill(_upcoming, snapshot.UpcomingCharges);
 
@@ -212,13 +232,13 @@ internal sealed class DashboardView : ViewBase
     private Task ToggleSummaryAsync()
     {
         var showSummary = _summaryPanel is not { Visible: true };
-        if (_summaryPanel is null || _overviewPanel is null)
+        if (_summaryPanel is null || _dashboardPanel is null)
         {
             return Task.CompletedTask;
         }
 
         _summaryPanel.Visible = showSummary;
-        _overviewPanel.Visible = !showSummary;
+        _dashboardPanel.Visible = !showSummary;
         if (_summaryToggle is not null)
         {
             _summaryToggle.Text = showSummary ? "Ocultar resumen" : "Ver resumen";
@@ -419,39 +439,14 @@ internal sealed class DashboardView : ViewBase
         var row = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 3,
+            ColumnCount = 2,
             RowCount = 1,
             BackColor = Palette.Canvas,
             Margin = new Padding(0, 0, 0, 14)
         };
 
         row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
-
-        var hero = new Card
-        {
-            Dock = DockStyle.Fill,
-            Radius = 18,
-            ShowBorder = false,
-            Margin = new Padding(0, 0, 14, 0),
-            Padding = new Padding(24, 20, 24, 18)
-        };
-
-        hero.Fill(Palette.Ink);
-
-        var heroLayout = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 3,
-            BackColor = Palette.Ink,
-            Margin = new Padding(0)
-        };
-
-        heroLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        heroLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        heroLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
 
         var balanceCaption = Ui.Caption("SALDO ACTUAL");
         balanceCaption.ForeColor = Color.FromArgb(150, 162, 172);
@@ -459,80 +454,75 @@ internal sealed class DashboardView : ViewBase
         _balance.Text = "—";
         _balanceHint.Text = "Cargando datos...";
 
-        heroLayout.Controls.Add(balanceCaption, 0, 0);
-        heroLayout.Controls.Add(_balance, 0, 1);
-        heroLayout.Controls.Add(_balanceHint, 0, 2);
-        hero.Controls.Add(heroLayout);
-
-        var projected = new Card
-        {
-            Dock = DockStyle.Fill,
-            Radius = 18,
-            ShowBorder = false,
-            Margin = new Padding(0, 0, 14, 0),
-            Padding = new Padding(20, 18, 20, 16)
-        };
-
-        projected.Fill(Palette.PrimarySoft);
-
-        var projectedLayout = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 3,
-            BackColor = Palette.PrimarySoft,
-            Margin = new Padding(0)
-        };
-
-        projectedLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        projectedLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        projectedLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-
         var projectedCaption = Ui.Caption("AHORRO PROYECTADO");
         projectedCaption.ForeColor = Palette.PrimaryDeep;
 
         _projected.Text = "—";
         _projectedHint.Text = "Cargando datos...";
 
-        projectedLayout.Controls.Add(projectedCaption, 0, 0);
-        projectedLayout.Controls.Add(_projected, 0, 1);
-        projectedLayout.Controls.Add(_projectedHint, 0, 2);
-        projected.Controls.Add(projectedLayout);
+        _balanceCard = BuildFinancialIndicator(
+            balanceCaption,
+            _balance,
+            _balanceHint,
+            Palette.Ink,
+            new Padding(24, 20, 24, 18),
+            new Padding(0, 0, 7, 0),
+            28f);
+        _projectedCard = BuildFinancialIndicator(
+            projectedCaption,
+            _projected,
+            _projectedHint,
+            Palette.PrimarySoft,
+            new Padding(24, 20, 24, 18),
+            new Padding(7, 0, 0, 0),
+            28f);
 
-        var activeCard = new Card
+        row.Controls.Add(_balanceCard, 0, 0);
+        row.Controls.Add(_projectedCard, 1, 0);
+
+        return row;
+    }
+
+    private Card BuildFinancialIndicator(
+        Label caption,
+        Label value,
+        Label hint,
+        Color fill,
+        Padding padding,
+        Padding margin,
+        float preferredFontSize)
+    {
+        var card = new Card
         {
             Dock = DockStyle.Fill,
             Radius = 18,
-            Margin = new Padding(0),
-            Padding = new Padding(20, 18, 20, 16)
+            ShowBorder = false,
+            Margin = margin,
+            Padding = padding
         };
+        card.Fill(fill);
 
-        var activeLayout = new TableLayoutPanel
+        var layout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
             RowCount = 3,
-            BackColor = Palette.Surface,
+            BackColor = fill,
             Margin = new Padding(0)
         };
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.Controls.Add(caption, 0, 0);
+        layout.Controls.Add(value, 0, 1);
+        layout.Controls.Add(hint, 0, 2);
+        card.Controls.Add(layout);
+        card.SizeChanged += (_, _) => UpdateFinancialIndicator(card, value, preferredFontSize);
+        value.TextChanged += (_, _) => UpdateFinancialIndicator(card, value, preferredFontSize);
+        card.ParentChanged += (_, _) => UpdateFinancialIndicator(card, value, preferredFontSize);
+        card.DpiChangedAfterParent += (_, _) => UpdateFinancialIndicator(card, value, preferredFontSize);
 
-        activeLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        activeLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        activeLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-
-        _active.Text = "—";
-        _activeHint.Text = "Cargando datos...";
-
-        activeLayout.Controls.Add(Ui.Caption("SUSCRIPCIONES"), 0, 0);
-        activeLayout.Controls.Add(_active, 0, 1);
-        activeLayout.Controls.Add(_activeHint, 0, 2);
-        activeCard.Controls.Add(activeLayout);
-
-        row.Controls.Add(hero, 0, 0);
-        row.Controls.Add(projected, 1, 0);
-        row.Controls.Add(activeCard, 2, 0);
-
-        return row;
+        return card;
     }
 
     private Control BuildKpis()
@@ -576,29 +566,275 @@ internal sealed class DashboardView : ViewBase
         return row;
     }
 
-    private Control BuildOverview()
+    private Control BuildDashboardPanel()
     {
-        var row = new TableLayoutPanel
+        _dashboardMainPanel = BuildDashboardMainPanel();
+        _dashboardLayout.Controls.Add(_dashboardMainPanel, 0, 0);
+        _sidebarPanel = BuildSidebar();
+        _dashboardLayout.Controls.Add(_sidebarPanel, 1, 0);
+        _dashboardScrollHost.Controls.Add(_dashboardLayout);
+        _dashboardScrollHost.SizeChanged += (_, _) => UpdateDashboardLayout();
+        _sidebarPanel.SizeChanged += (_, _) => UpdateSidebarLayout();
+        UpdateDashboardLayout();
+
+        return _dashboardScrollHost;
+    }
+
+    private Control BuildDashboardMainPanel()
+    {
+        var panel = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 2,
-            RowCount = 1,
+            ColumnCount = 1,
+            RowCount = 3,
             BackColor = Palette.Canvas,
             Margin = new Padding(0)
         };
 
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 58));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 42));
+        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 42));
+        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 17));
+        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 41));
+        _dashboardMainLayout = panel;
 
+        panel.Controls.Add(BuildHero(), 0, 0);
+        panel.Controls.Add(BuildSubscriptionsInfo(), 0, 1);
+        panel.Controls.Add(BuildKpis(), 0, 2);
+
+        return panel;
+    }
+
+    private Control BuildSubscriptionsInfo()
+    {
+        _subscriptionsCard = new Card
+        {
+            Dock = DockStyle.Fill,
+            Radius = 14,
+            Padding = new Padding(16, 8, 16, 8),
+            Margin = new Padding(0, 0, 0, 14)
+        };
+
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 3,
+            BackColor = Palette.Surface,
+            Margin = new Padding(0)
+        };
+        _subscriptionsLayout = layout;
+
+        _active.Text = "—";
+        _activeHint.Text = "Cargando datos...";
+        _activeHint.TextAlign = ContentAlignment.MiddleLeft;
+
+        layout.Controls.Add(Ui.Caption("SUSCRIPCIONES ACTIVAS"), 0, 0);
+        layout.Controls.Add(_active, 0, 1);
+        layout.Controls.Add(_activeHint, 0, 2);
+        _subscriptionsCard.Controls.Add(layout);
+        _subscriptionsCard.SizeChanged += (_, _) => UpdateSubscriptionsLayout();
+        _subscriptionsCard.DpiChangedAfterParent += (_, _) => UpdateSubscriptionsLayout();
+        _active.TextChanged += (_, _) => UpdateSubscriptionsLayout();
+        _activeHint.TextChanged += (_, _) => UpdateSubscriptionsLayout();
+
+        return _subscriptionsCard;
+    }
+
+    private void UpdateFinancialIndicator(Card card, Label value, float preferredFontSize)
+    {
+        if (card.ClientSize.Width <= 0)
+        {
+            return;
+        }
+
+        var dpiScale = card.DeviceDpi / 96f;
+        var horizontalPadding = Math.Clamp(card.ClientSize.Width / 16, (int)(12 * dpiScale), (int)(24 * dpiScale));
+        var verticalPadding = (int)(18 * dpiScale);
+        card.Padding = new Padding(horizontalPadding, verticalPadding, horizontalPadding, verticalPadding);
+        if (card == _balanceCard)
+        {
+            card.Margin = new Padding(0, 0, (int)(7 * dpiScale), 0);
+        }
+        else if (card == _projectedCard)
+        {
+            card.Margin = new Padding((int)(7 * dpiScale), 0, 0, 0);
+        }
+
+        var availableWidth = Math.Max(1, card.ClientSize.Width - card.Padding.Horizontal);
+        var minimumFontSize = 17f;
+        var fontSize = preferredFontSize;
+
+        while (fontSize > minimumFontSize &&
+               TextRenderer.MeasureText(value.Text, Palette.Font(fontSize, FontStyle.Bold)).Width > availableWidth)
+        {
+            fontSize -= 0.5f;
+        }
+
+        value.Font = Palette.Font(Math.Max(fontSize, minimumFontSize), FontStyle.Bold);
+    }
+
+    private void UpdateSubscriptionsLayout()
+    {
+        if (_subscriptionsCard is null || _subscriptionsLayout is null)
+        {
+            return;
+        }
+
+        var dpiScale = _subscriptionsCard.DeviceDpi / 96f;
+        var horizontalLayout = _subscriptionsCard.ClientSize.Width >= (int)(480 * dpiScale);
+        _subscriptionsCard.Padding = new Padding(
+            (int)(16 * dpiScale),
+            (int)(8 * dpiScale),
+            (int)(16 * dpiScale),
+            (int)(8 * dpiScale));
+
+        _subscriptionsLayout.SuspendLayout();
+        _subscriptionsLayout.ColumnCount = horizontalLayout ? 3 : 1;
+        _subscriptionsLayout.RowCount = horizontalLayout ? 1 : 3;
+        _subscriptionsLayout.ColumnStyles.Clear();
+        _subscriptionsLayout.RowStyles.Clear();
+
+        if (horizontalLayout)
+        {
+            _subscriptionsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            _subscriptionsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, (int)(72 * dpiScale)));
+            _subscriptionsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            _subscriptionsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            _subscriptionsLayout.SetCellPosition(_active, new TableLayoutPanelCellPosition(1, 0));
+            _subscriptionsLayout.SetCellPosition(_activeHint, new TableLayoutPanelCellPosition(2, 0));
+            _activeHint.TextAlign = ContentAlignment.MiddleRight;
+            _active.Font = Palette.Font(26f, FontStyle.Bold);
+        }
+        else
+        {
+            _subscriptionsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            _subscriptionsLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            _subscriptionsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            _subscriptionsLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            _subscriptionsLayout.SetCellPosition(_active, new TableLayoutPanelCellPosition(0, 1));
+            _subscriptionsLayout.SetCellPosition(_activeHint, new TableLayoutPanelCellPosition(0, 2));
+            _activeHint.TextAlign = ContentAlignment.MiddleLeft;
+            _active.Font = Palette.Font(23f, FontStyle.Bold);
+        }
+
+        _subscriptionsLayout.ResumeLayout(true);
+
+        if (_dashboardMainLayout is not null && _dashboardMainLayout.RowStyles.Count == 3)
+        {
+            _dashboardMainLayout.RowStyles[0].Height = horizontalLayout ? 42 : 38;
+            _dashboardMainLayout.RowStyles[1].Height = horizontalLayout ? 17 : 23;
+            _dashboardMainLayout.RowStyles[2].Height = horizontalLayout ? 41 : 39;
+        }
+    }
+
+    private DashboardScrollPanel BuildSidebar()
+    {
+        var panel = new DashboardScrollPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoScroll = true,
+            BackColor = Palette.Canvas,
+            Margin = new Padding(0)
+        };
+
+        _sidebarContent = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            ColumnCount = 1,
+            RowCount = 2,
+            BackColor = Palette.Canvas,
+            Margin = new Padding(0)
+        };
+        _sidebarContent.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        _sidebarContent.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        _sidebarContent.Controls.Add(BuildList("Próximos pagos", _upcoming, _upcomingCount, true), 0, 0);
+        _sidebarContent.Controls.Add(BuildList("Actividad reciente", _activity, _activityCount, false), 0, 1);
         _upcoming.RowTemplate.Height = 38;
         _upcoming.ColumnHeadersHeight = 34;
+        _upcoming.ScrollBars = ScrollBars.None;
         _activity.RowTemplate.Height = 38;
         _activity.ColumnHeadersHeight = 34;
+        _activity.ScrollBars = ScrollBars.None;
+        _overdue.ScrollBars = ScrollBars.None;
+        panel.Controls.Add(_sidebarContent);
 
-        row.Controls.Add(BuildList("Próximos cargos", _upcoming, _upcomingCount, true), 0, 0);
-        row.Controls.Add(BuildList("Actividad reciente", _activity, _activityCount, false), 1, 0);
+        return panel;
+    }
 
-        return row;
+    private void UpdateDashboardLayout()
+    {
+        if (_dashboardMainPanel is null ||
+            _sidebarPanel is null ||
+            _dashboardScrollHost.ClientSize.Width <= 0 ||
+            _dashboardScrollHost.ClientSize.Height <= 0)
+        {
+            return;
+        }
+
+        var viewportWidth = _dashboardScrollHost.ClientSize.Width;
+        var viewportHeight = _dashboardScrollHost.ClientSize.Height;
+        var useColumns = viewportWidth >= 1040;
+        var mainHeight = Math.Max(440, (int)(viewportHeight * 0.8));
+        var sidebarHeight = Math.Max(560, viewportHeight);
+        var layoutHeight = useColumns
+            ? viewportHeight
+            : mainHeight + sidebarHeight;
+        var layoutWidth = viewportWidth;
+
+        _dashboardLayout.SuspendLayout();
+        _dashboardScrollHost.SuspendLayout();
+        _dashboardLayout.ColumnCount = useColumns ? 2 : 1;
+        _dashboardLayout.RowCount = useColumns ? 1 : 2;
+        _dashboardLayout.ColumnStyles.Clear();
+        _dashboardLayout.RowStyles.Clear();
+
+        if (useColumns)
+        {
+            _dashboardLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 62));
+            _dashboardLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 38));
+            _dashboardLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            _dashboardLayout.SetCellPosition(
+                _sidebarPanel,
+                new TableLayoutPanelCellPosition(1, 0));
+            _dashboardMainPanel.Height = layoutHeight;
+            _sidebarPanel.Height = layoutHeight;
+        }
+        else
+        {
+            _dashboardLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            _dashboardLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, mainHeight));
+            _dashboardLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, sidebarHeight));
+            _dashboardLayout.SetCellPosition(
+                _sidebarPanel,
+                new TableLayoutPanelCellPosition(0, 1));
+            _dashboardMainPanel.Height = mainHeight;
+            _sidebarPanel.Height = sidebarHeight;
+        }
+
+        _dashboardLayout.SetCellPosition(
+            _dashboardMainPanel,
+            new TableLayoutPanelCellPosition(0, 0));
+        _dashboardLayout.Location = Point.Empty;
+        _dashboardLayout.Size = new Size(layoutWidth, layoutHeight);
+        _dashboardScrollHost.AutoScrollMinSize = new Size(layoutWidth, layoutHeight);
+        _dashboardScrollHost.ResumeLayout(true);
+        _dashboardLayout.ResumeLayout(true);
+        UpdateSidebarLayout();
+    }
+
+    private void UpdateSidebarLayout()
+    {
+        if (_sidebarPanel is null ||
+            _sidebarContent is null ||
+            _sidebarPanel.ClientSize.Width <= 0 ||
+            _sidebarPanel.ClientSize.Height <= 0)
+        {
+            return;
+        }
+
+        var contentHeight = Math.Max(640, _sidebarPanel.ClientSize.Height);
+        var contentWidth = _sidebarPanel.ClientSize.Width;
+        _sidebarContent.Size = new Size(contentWidth, contentHeight);
+        _sidebarPanel.AutoScrollMinSize = new Size(contentWidth, contentHeight);
     }
 
     private Control BuildSummaryPanel()
@@ -628,9 +864,34 @@ internal sealed class DashboardView : ViewBase
         _chartEmpty.Dock = DockStyle.Fill;
         _chartEmpty.TextAlign = ContentAlignment.MiddleCenter;
 
-        chartCard.Controls.Add(_chart);
-        chartCard.Controls.Add(_chartEmpty);
-        chartCard.Controls.Add(Ui.Header("Últimos 6 meses", _summaryFigures));
+        _summaryBalance.AutoSize = false;
+        _summaryBalance.Dock = DockStyle.Fill;
+        _summaryBalance.TextAlign = ContentAlignment.MiddleLeft;
+
+        var chartArea = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = Palette.Surface,
+            Margin = new Padding(0)
+        };
+        chartArea.Controls.Add(_chart);
+        chartArea.Controls.Add(_chartEmpty);
+
+        var chartLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 3,
+            BackColor = Palette.Surface,
+            Margin = new Padding(0)
+        };
+        chartLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+        chartLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+        chartLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        chartLayout.Controls.Add(Ui.Header("Últimos 6 meses", _summaryFigures), 0, 0);
+        chartLayout.Controls.Add(_summaryBalance, 0, 1);
+        chartLayout.Controls.Add(chartArea, 0, 2);
+        chartCard.Controls.Add(chartLayout);
 
         _overdue.RowTemplate.Height = 38;
         _overdue.ColumnHeadersHeight = 34;
@@ -729,4 +990,51 @@ internal sealed class DashboardView : ViewBase
         long AmountCents,
         string Status,
         Color Color);
+
+    private sealed class DashboardScrollPanel : Panel
+    {
+        private const int ScrollBarsBoth = 3;
+        private const int WmSize = 0x0005;
+        private const int WmNcPaint = 0x0085;
+        private const int WmStyleChanged = 0x007D;
+        private const int WmVScroll = 0x0115;
+        private const int WmHScroll = 0x0114;
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            HideScrollBars();
+        }
+
+        protected override void OnLayout(LayoutEventArgs levent)
+        {
+            base.OnLayout(levent);
+            HideScrollBars();
+        }
+
+        protected override void WndProc(ref Message message)
+        {
+            base.WndProc(ref message);
+
+            if (message.Msg is WmSize or WmNcPaint or WmStyleChanged or WmVScroll or WmHScroll)
+            {
+                HideScrollBars();
+            }
+        }
+
+        private void HideScrollBars()
+        {
+            if (IsHandleCreated)
+            {
+                ShowScrollBar(Handle, ScrollBarsBoth, false);
+            }
+        }
+
+        [DllImport("user32.dll", ExactSpelling = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ShowScrollBar(
+            IntPtr hWnd,
+            int wBar,
+            [MarshalAs(UnmanagedType.Bool)] bool show);
+    }
 }

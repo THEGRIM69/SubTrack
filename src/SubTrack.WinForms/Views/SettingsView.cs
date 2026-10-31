@@ -10,6 +10,18 @@ internal sealed class SettingsView : ViewBase
 {
     private readonly DataGridView _categoriesGrid = Ui.Grid(("Categoría", 70f), ("Estado", 30f));
     private readonly DataGridView _historyGrid = Ui.Grid(("Fecha", 34f), ("Anterior", 33f), ("Nuevo", 33f));
+    private readonly Panel _scrollHost = new() { Dock = DockStyle.Fill, AutoScroll = true, BackColor = Palette.Canvas };
+    private readonly TableLayoutPanel _rootLayout = new()
+    {
+        ColumnCount = 2,
+        RowCount = 1,
+        BackColor = Palette.Canvas,
+        Margin = Padding.Empty,
+        Padding = Padding.Empty
+    };
+    private FlatButton? _clearOpeningButton;
+    private Control? _categoriesPanel;
+    private Control? _sidePanel;
 
     private readonly Label _categoriesSummary = new()
     {
@@ -70,23 +82,16 @@ internal sealed class SettingsView : ViewBase
 
     protected override void Build()
     {
-        var root = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 2,
-            RowCount = 1,
-            BackColor = Palette.Canvas,
-            Margin = new Padding(0),
-            Padding = new Padding(0)
-        };
+        _categoriesPanel = BuildCategories();
+        _sidePanel = BuildSide();
 
-        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55));
-        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45));
+        _rootLayout.Controls.Add(_categoriesPanel, 0, 0);
+        _rootLayout.Controls.Add(_sidePanel, 1, 0);
+        _scrollHost.Controls.Add(_rootLayout);
+        _scrollHost.SizeChanged += (_, _) => UpdateResponsiveLayout();
 
-        root.Controls.Add(BuildCategories(), 0, 0);
-        root.Controls.Add(BuildSide(), 1, 0);
-
-        Controls.Add(root);
+        Controls.Add(_scrollHost);
+        UpdateResponsiveLayout();
     }
 
     protected override async Task LoadAsync()
@@ -108,9 +113,10 @@ internal sealed class SettingsView : ViewBase
         var actions = new FlowLayoutPanel
         {
             Dock = DockStyle.Bottom,
-            Height = 46,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             FlowDirection = FlowDirection.LeftToRight,
-            WrapContents = false,
+            WrapContents = true,
             Padding = new Padding(0, 8, 0, 0),
             Margin = new Padding(0)
         };
@@ -149,15 +155,68 @@ internal sealed class SettingsView : ViewBase
             Padding = new Padding(0)
         };
 
-        side.RowStyles.Add(new RowStyle(SizeType.Absolute, 182));
-        side.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        side.RowStyles.Add(new RowStyle(SizeType.Absolute, 196));
+        side.RowStyles.Add(new RowStyle(SizeType.Percent, 28));
+        side.RowStyles.Add(new RowStyle(SizeType.Percent, 42));
+        side.RowStyles.Add(new RowStyle(SizeType.Percent, 30));
 
         side.Controls.Add(BuildOpening(), 0, 0);
         side.Controls.Add(BuildHistory(), 0, 1);
         side.Controls.Add(BuildMaintenance(), 0, 2);
+        side.MinimumSize = new Size(0, 660);
 
         return side;
+    }
+
+    private void UpdateResponsiveLayout()
+    {
+        if (_categoriesPanel is null || _sidePanel is null)
+        {
+            return;
+        }
+
+        var viewportWidth = _scrollHost.ClientSize.Width;
+        var viewportHeight = _scrollHost.ClientSize.Height;
+        var isWide = viewportWidth >= 1040;
+        var rootHeight = isWide
+            ? Math.Max(viewportHeight, 660)
+            : Math.Max(360, Math.Min(480, (int)(viewportHeight * 0.55))) + 660;
+        var needsVerticalScroll = rootHeight > viewportHeight;
+        var rootWidth = Math.Max(
+            0,
+            viewportWidth - (needsVerticalScroll ? SystemInformation.VerticalScrollBarWidth : 0));
+
+        _rootLayout.SuspendLayout();
+        _scrollHost.SuspendLayout();
+
+        _rootLayout.ColumnCount = isWide ? 2 : 1;
+        _rootLayout.RowCount = isWide ? 1 : 2;
+        _rootLayout.ColumnStyles.Clear();
+        _rootLayout.RowStyles.Clear();
+
+        if (isWide)
+        {
+            _rootLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55));
+            _rootLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45));
+            _rootLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            _rootLayout.SetCellPosition(_sidePanel, new TableLayoutPanelCellPosition(1, 0));
+        }
+        else
+        {
+            _rootLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            _rootLayout.RowStyles.Add(new RowStyle(
+                SizeType.Absolute,
+                Math.Max(360, Math.Min(480, (int)(viewportHeight * 0.55)))));
+            _rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 660));
+            _rootLayout.SetCellPosition(_sidePanel, new TableLayoutPanelCellPosition(0, 1));
+        }
+
+        _rootLayout.SetCellPosition(_categoriesPanel, new TableLayoutPanelCellPosition(0, 0));
+        _rootLayout.Location = Point.Empty;
+        _rootLayout.Size = new Size(rootWidth, rootHeight);
+        _scrollHost.AutoScrollMinSize = new Size(rootWidth, rootHeight);
+
+        _scrollHost.ResumeLayout(true);
+        _rootLayout.ResumeLayout(true);
     }
 
     private Control BuildOpening()
@@ -188,12 +247,18 @@ internal sealed class SettingsView : ViewBase
             Dock = DockStyle.Top,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            WrapContents = false,
+            WrapContents = true,
             Padding = new Padding(0, 8, 0, 0),
             Margin = new Padding(0)
         };
 
         buttonRow.Controls.Add(Ui.Compact(Ui.Action("Configurar / corregir", ConfigureOpeningAsync)));
+        _clearOpeningButton = Ui.Compact(Ui.Action(
+            "Limpiar saldo inicial",
+            ClearOpeningAsync,
+            ButtonKind.Danger));
+        _clearOpeningButton.Enabled = false;
+        buttonRow.Controls.Add(_clearOpeningButton);
 
         layout.Controls.Add(Ui.Caption("SALDO INICIAL"), 0, 0);
         layout.Controls.Add(_openingValue, 0, 1);
@@ -329,6 +394,11 @@ internal sealed class SettingsView : ViewBase
             _openingStart = null;
             _openingValue.Text = "Sin configurar";
             _openingDate.Text = "Configura tu punto de partida para que el saldo sea exacto.";
+        }
+
+        if (_clearOpeningButton is not null)
+        {
+            _clearOpeningButton.Enabled = _openingConfigured;
         }
 
         var history = await Context.Services.OpeningBalance.GetCorrectionsAsync();
@@ -479,7 +549,7 @@ internal sealed class SettingsView : ViewBase
         using var dialog = new FormDialog(
             _openingConfigured ? "Corregir saldo inicial" : "Configurar saldo inicial",
             _openingConfigured
-                ? "La corrección conserva el saldo anterior en el historial."
+                ? "El importe reemplazará el saldo inicial vigente. Los movimientos registrados se conservan y el cambio queda en el historial."
                 : "Es el punto de partida de tu saldo: no se registra como ingreso.",
             "Guardar saldo");
 
@@ -506,6 +576,38 @@ internal sealed class SettingsView : ViewBase
         }
 
         Notify("Saldo inicial guardado.");
+        await DataChangedAsync(DataChangeKind.OpeningBalance);
+    }
+
+    private async Task ClearOpeningAsync()
+    {
+        var confirmed = Confirm.Ask(
+            FindForm(),
+            "Limpiar saldo inicial",
+            "El saldo inicial vigente se establecerá en $0.00. Los ingresos, gastos, pagos y demás movimientos se conservarán.",
+            "Limpiar saldo",
+            danger: true);
+
+        if (!confirmed)
+        {
+            return;
+        }
+
+        var current = await Context.Services.OpeningBalance.GetAsync();
+        if (Failed(current))
+        {
+            return;
+        }
+
+        var result = await Context.Services.OpeningBalance.CorrectAsync(
+            new CorrectOpeningBalanceRequest(0, current.Value.StartDate));
+
+        if (Failed(result))
+        {
+            return;
+        }
+
+        Notify("Saldo inicial establecido en $0.00.");
         await DataChangedAsync(DataChangeKind.OpeningBalance);
     }
 
