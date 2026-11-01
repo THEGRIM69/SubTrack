@@ -27,7 +27,440 @@ public sealed class SqliteDatabaseMigratorTests : IDisposable
     }
 
     [Fact]
-    public async Task MigrateAsync_WithDefaultProvider_AppliesOfficialInitialSchema()
+    public async Task MigrateAsync_FromHistoricalV1AndFromNewDatabase_ProducesEquivalentSchema()
+    {
+        var historicalV1 = OfficialMigrations.All[0];
+        var v1Migrator = new SqliteDatabaseMigrator(
+            _options,
+            new StaticSqliteMigrationProvider([historicalV1]));
+        await v1Migrator.MigrateAsync();
+        await SeedHistoricalV1DataAsync(_databasePath);
+
+        var upgradeResult = await new SqliteDatabaseMigrator(_options).MigrateAsync();
+        Assert.Equal(OfficialMigrations.GuidValidationVersion, upgradeResult.FinalVersion);
+
+        var newDatabasePath = Path.Combine(_tempDirectory, "subtrack-new-install.db");
+        var newOptions = new SubTrackDatabaseOptions
+        {
+            DatabasePath = newDatabasePath,
+            BusyTimeoutMilliseconds = 2_000
+        };
+        var newInstallResult = await new SqliteDatabaseMigrator(newOptions).MigrateAsync();
+        Assert.Equal(OfficialMigrations.GuidValidationVersion, newInstallResult.FinalVersion);
+
+        Assert.Equal(
+            await ReadLogicalSchemaAsync(_databasePath),
+            await ReadLogicalSchemaAsync(newDatabasePath));
+        Assert.Equal(0, await ReadForeignKeyViolationsAsync(_databasePath));
+        Assert.Equal(0, await ReadForeignKeyViolationsAsync(newDatabasePath));
+
+        await using var connection = new SqliteConnection($"Data Source={_databasePath}");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT s.nombre, c.estado, p.estado, p.monto_centavos
+            FROM pagos p
+            JOIN cobros_programados c ON c.id = p.cobro_id
+            JOIN suscripciones s ON s.id = c.suscripcion_id
+            WHERE p.id = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+            """;
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal("Historical subscription", reader.GetString(0));
+        Assert.Equal("PENDIENTE", reader.GetString(1));
+        Assert.Equal("VIGENTE", reader.GetString(2));
+        Assert.Equal(1500, reader.GetInt64(3));
+        Assert.False(await reader.ReadAsync());
+        await reader.DisposeAsync();
+
+        command.CommandText = "PRAGMA user_version;";
+        Assert.Equal(OfficialMigrations.GuidValidationVersion, Convert.ToInt32(await command.ExecuteScalarAsync()));
+
+        command.CommandText = $"""
+            SELECT checksum FROM {SqliteDatabaseMigrator.MigrationsTableName} WHERE version = 1;
+            """;
+        Assert.Equal(
+            "a79092c05bda71f7cb92807110c1293c43ad0555ab1fe87d6e1820e16697298f",
+            (string?)await command.ExecuteScalarAsync());
+    }
+
+    [Fact]
+    public async Task MigrateAsync_V2RejectsInvalidHistoricalGuidWithoutChangingDataOrHistory()
+    {
+        var v1 = OfficialMigrations.All[0];
+        await new SqliteDatabaseMigrator(
+            _options,
+            new StaticSqliteMigrationProvider([v1])).MigrateAsync();
+
+        await using (var connection = new SqliteConnection($"Data Source={_databasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                INSERT INTO categorias_gasto
+                    (id, nombre, activa, creado_en, actualizado_en)
+                VALUES
+                    ('zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz',
+                     'legacy-invalid-guid', 1, '2026-10-25T00:00:00.000Z',
+                     '2026-10-25T00:00:00.000Z');
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var exception = await Assert.ThrowsAsync<SubTrackPersistenceException>(
+            () => new SqliteDatabaseMigrator(_options).MigrateAsync());
+
+        Assert.Equal(PersistenceFailureKind.MigrationFailed, exception.Kind);
+        Assert.Contains("invalid GUID", exception.Message, StringComparison.OrdinalIgnoreCase);
+
+        await using var verificationConnection = new SqliteConnection($"Data Source={_databasePath}");
+        await verificationConnection.OpenAsync();
+        await using var verificationCommand = verificationConnection.CreateCommand();
+        verificationCommand.CommandText = """
+            SELECT id FROM categorias_gasto WHERE nombre = 'legacy-invalid-guid';
+            """;
+        Assert.Equal(
+            "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz",
+            (string?)await verificationCommand.ExecuteScalarAsync());
+
+        verificationCommand.CommandText = $"""
+            SELECT COUNT(*) FROM {SqliteDatabaseMigrator.MigrationsTableName};
+            """;
+        Assert.Equal(1, Convert.ToInt32(await verificationCommand.ExecuteScalarAsync()));
+        verificationCommand.CommandText = "PRAGMA user_version;";
+        Assert.Equal(1, Convert.ToInt32(await verificationCommand.ExecuteScalarAsync()));
+        verificationCommand.CommandText = """
+            SELECT COUNT(*) FROM sqlite_master
+            WHERE type = 'trigger' AND name = 'trg_v2_guid_categorias_gasto_insert';
+            """;
+        Assert.Equal(0, Convert.ToInt32(await verificationCommand.ExecuteScalarAsync()));
+    }
+
+    [Fact]
+    public async Task MigrateAsync_V2RejectsLegacyVigentePaymentWithMismatchedAmountAndRollsBack()
+    {
+        await PrepareHistoricalV1DatabaseAsync();
+
+        await using (var connection = new SqliteConnection($"Data Source={_databasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                UPDATE pagos
+                SET estado = 'ANULADO',
+                    monto_centavos = 1000,
+                    anulado_en = '2026-10-28T00:00:00.000Z',
+                    motivo_anulacion = 'legacy mismatch'
+                WHERE id = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+
+                UPDATE pagos
+                SET estado = 'VIGENTE',
+                    anulado_en = NULL,
+                    motivo_anulacion = NULL
+                WHERE id = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        await AssertLegacyPaymentRejectedAndV1PreservedAsync(
+            "existing VIGENTE payments",
+            "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            "VIGENTE",
+            1000);
+    }
+
+    [Fact]
+    public async Task MigrateAsync_V2RejectsLegacyVigentePaymentWithoutChargeAndRollsBack()
+    {
+        await PrepareHistoricalV1DatabaseAsync();
+
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = _databasePath,
+            ForeignKeys = false
+        }.ToString();
+        await using (var connection = new SqliteConnection(connectionString))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                UPDATE pagos
+                SET cobro_id = 'ffffffff-ffff-4fff-8fff-ffffffffffff'
+                WHERE id = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        await AssertLegacyPaymentRejectedAndV1PreservedAsync(
+            "existing VIGENTE payments",
+            "ffffffff-ffff-4fff-8fff-ffffffffffff",
+            "VIGENTE",
+            1500);
+    }
+
+    [Fact]
+    public async Task MigrateAsync_V2AcceptsLegacyAnnulledPaymentWithMismatchedAmount()
+    {
+        await PrepareHistoricalV1DatabaseAsync();
+
+        await using (var connection = new SqliteConnection($"Data Source={_databasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                UPDATE pagos
+                SET estado = 'ANULADO',
+                    monto_centavos = 1000,
+                    anulado_en = '2026-10-28T00:00:00.000Z',
+                    motivo_anulacion = 'legacy mismatch'
+                WHERE id = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var result = await new SqliteDatabaseMigrator(_options).MigrateAsync();
+        Assert.Equal(OfficialMigrations.GuidValidationVersion, result.FinalVersion);
+
+        await using var verificationConnection = new SqliteConnection($"Data Source={_databasePath}");
+        await verificationConnection.OpenAsync();
+        await using var verificationCommand = verificationConnection.CreateCommand();
+        verificationCommand.CommandText = """
+            SELECT estado, monto_centavos FROM pagos
+            WHERE id = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+            """;
+        await using var reader = await verificationCommand.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal("ANULADO", reader.GetString(0));
+        Assert.Equal(1000, reader.GetInt64(1));
+        Assert.False(await reader.ReadAsync());
+        await reader.DisposeAsync();
+
+        verificationCommand.CommandText = "PRAGMA foreign_key_check;";
+        await using var foreignKeyReader = await verificationCommand.ExecuteReaderAsync();
+        Assert.False(await foreignKeyReader.ReadAsync());
+    }
+
+    [Fact]
+    public async Task MigrateAsync_WhenV2Fails_RollsBackItsSchemaDataHistoryAndUserVersion()
+    {
+        var v1 = OfficialMigrations.All[0];
+        await new SqliteDatabaseMigrator(
+            _options,
+            new StaticSqliteMigrationProvider([v1])).MigrateAsync();
+        await SeedHistoricalV1DataAsync(_databasePath);
+
+        var officialV2 = OfficialMigrations.All[1];
+        var failingV2 = new SqliteMigration(
+            officialV2.Version,
+            officialV2.Name,
+            officialV2.SqlContent + Environment.NewLine + "SINTAXIS_SQL_INVALIDA_TOTAL;");
+        var exception = await Assert.ThrowsAsync<SubTrackPersistenceException>(
+            () => new SqliteDatabaseMigrator(
+                _options,
+                new StaticSqliteMigrationProvider([v1, failingV2])).MigrateAsync());
+
+        Assert.Equal(PersistenceFailureKind.MigrationFailed, exception.Kind);
+
+        await using var connection = new SqliteConnection($"Data Source={_databasePath}");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT COUNT(*) FROM sqlite_master
+            WHERE type = 'trigger' AND name = 'trg_v2_guid_pagos_insert';
+            """;
+        Assert.Equal(0, Convert.ToInt32(await command.ExecuteScalarAsync()));
+
+        command.CommandText = $"""
+            SELECT COUNT(*) FROM {SqliteDatabaseMigrator.MigrationsTableName};
+            """;
+        Assert.Equal(1, Convert.ToInt32(await command.ExecuteScalarAsync()));
+        command.CommandText = $"""
+            SELECT checksum FROM {SqliteDatabaseMigrator.MigrationsTableName} WHERE version = 1;
+            """;
+        Assert.Equal(v1.CalculateChecksum(), await command.ExecuteScalarAsync());
+        command.CommandText = "PRAGMA user_version;";
+        Assert.Equal(1, Convert.ToInt32(await command.ExecuteScalarAsync()));
+        command.CommandText = """
+            SELECT COUNT(*) FROM pagos
+            WHERE id = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
+              AND monto_centavos = 1500;
+            """;
+        Assert.Equal(1, Convert.ToInt32(await command.ExecuteScalarAsync()));
+        command.CommandText = "PRAGMA foreign_key_check;";
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.False(await reader.ReadAsync());
+    }
+
+    private static async Task SeedHistoricalV1DataAsync(string databasePath)
+    {
+        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO suscripciones
+                (id, nombre, operacion_id, monto_centavos, tipo_importe, frecuencia,
+                 fecha_inicio, proximo_cobro, activa, desactivada_en, creado_en, actualizado_en)
+            VALUES
+                ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'Historical subscription',
+                 'aaaaaaaa-0000-4000-8000-000000000001', 1500, 'FIJO', 'MENSUAL',
+                 '2026-10-01', '2026-11-01', 1, NULL,
+                 '2026-10-25T00:00:00.000Z', '2026-10-25T00:00:00.000Z');
+
+            INSERT INTO suscripcion_versiones
+                (id, suscripcion_id, numero_version, vigente_desde, monto_centavos,
+                 tipo_importe, frecuencia, dia_ancla, creado_en)
+            VALUES
+                ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+                 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 1, '2026-10-01', 1500,
+                 'FIJO', 'MENSUAL', 1, '2026-10-25T00:00:00.000Z');
+
+            INSERT INTO cobros_programados
+                (id, suscripcion_id, fecha_programada, monto_centavos, estado, creado_en, actualizado_en)
+            VALUES
+                ('cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+                 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '2026-11-01', 1500,
+                 'PENDIENTE', '2026-10-25T00:00:00.000Z', '2026-10-25T00:00:00.000Z');
+
+            INSERT INTO pagos
+                (id, cobro_id, operacion_id, fecha_pago, monto_centavos, estado,
+                 numero_comprobante, anulado_en, motivo_anulacion, creado_en, actualizado_en)
+            VALUES
+                ('eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+                 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+                 'eeeeeeee-0000-4000-8000-000000000001', '2026-10-27', 1500,
+                 'VIGENTE', 'CMP-2026-000001', NULL, NULL,
+                 '2026-10-25T00:00:00.000Z', '2026-10-25T00:00:00.000Z');
+            """;
+        await command.ExecuteNonQueryAsync();
+    }
+
+    private async Task PrepareHistoricalV1DatabaseAsync()
+    {
+        var v1 = OfficialMigrations.All[0];
+        await new SqliteDatabaseMigrator(
+            _options,
+            new StaticSqliteMigrationProvider([v1])).MigrateAsync();
+        await SeedHistoricalV1DataAsync(_databasePath);
+    }
+
+    private async Task AssertLegacyPaymentRejectedAndV1PreservedAsync(
+        string expectedError,
+        string expectedChargeId,
+        string expectedState,
+        long expectedAmount)
+    {
+        var exception = await Assert.ThrowsAsync<SubTrackPersistenceException>(
+            () => new SqliteDatabaseMigrator(_options).MigrateAsync());
+        Assert.Equal(PersistenceFailureKind.MigrationFailed, exception.Kind);
+        Assert.Contains(expectedError, exception.Message, StringComparison.OrdinalIgnoreCase);
+
+        await using var connection = new SqliteConnection($"Data Source={_databasePath}");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT cobro_id, estado, monto_centavos, anulado_en, motivo_anulacion
+            FROM pagos
+            WHERE id = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+            """;
+        await using (var reader = await command.ExecuteReaderAsync())
+        {
+            Assert.True(await reader.ReadAsync());
+            Assert.Equal(expectedChargeId, reader.GetString(0));
+            Assert.Equal(expectedState, reader.GetString(1));
+            Assert.Equal(expectedAmount, reader.GetInt64(2));
+            if (expectedState == "ANULADO")
+            {
+                Assert.False(reader.IsDBNull(3));
+                Assert.Equal("legacy mismatch", reader.GetString(4));
+            }
+            else
+            {
+                Assert.True(reader.IsDBNull(3));
+                Assert.True(reader.IsDBNull(4));
+            }
+        }
+
+        command.CommandText = $"""
+            SELECT COUNT(*) FROM {SqliteDatabaseMigrator.MigrationsTableName};
+            """;
+        Assert.Equal(1, Convert.ToInt32(await command.ExecuteScalarAsync()));
+        command.CommandText = $"""
+            SELECT checksum FROM {SqliteDatabaseMigrator.MigrationsTableName} WHERE version = 1;
+            """;
+        Assert.Equal(
+            "a79092c05bda71f7cb92807110c1293c43ad0555ab1fe87d6e1820e16697298f",
+            (string?)await command.ExecuteScalarAsync());
+        command.CommandText = "PRAGMA user_version;";
+        Assert.Equal(1, Convert.ToInt32(await command.ExecuteScalarAsync()));
+
+        command.CommandText = """
+            SELECT sql FROM sqlite_master
+            WHERE type = 'trigger' AND name = 'trg_pagos_importe_completo';
+            """;
+        var insertTriggerSql = (string?)await command.ExecuteScalarAsync();
+        Assert.NotNull(insertTriggerSql);
+        Assert.Contains("BEFORE INSERT ON pagos", insertTriggerSql, StringComparison.OrdinalIgnoreCase);
+
+        command.CommandText = """
+            SELECT sql FROM sqlite_master
+            WHERE type = 'trigger' AND name = 'trg_pagos_importe_completo_update';
+            """;
+        var updateTriggerSql = (string?)await command.ExecuteScalarAsync();
+        Assert.NotNull(updateTriggerSql);
+        Assert.Contains(
+            "BEFORE UPDATE OF monto_centavos, cobro_id ON pagos",
+            updateTriggerSql,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("UPDATE OF estado", updateTriggerSql, StringComparison.OrdinalIgnoreCase);
+
+        command.CommandText = """
+            SELECT COUNT(*) FROM sqlite_master
+            WHERE type = 'trigger' AND name = 'trg_v2_guid_pagos_insert';
+            """;
+        Assert.Equal(0, Convert.ToInt32(await command.ExecuteScalarAsync()));
+    }
+
+    private static async Task<IReadOnlyList<string>> ReadLogicalSchemaAsync(string databasePath)
+    {
+        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT type || '|' || name || '|' || tbl_name || '|' || COALESCE(sql, '')
+            FROM sqlite_master
+            WHERE substr(name, 1, 7) <> 'sqlite_'
+            ORDER BY type, name;
+            """;
+
+        var schema = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            schema.Add(reader.GetString(0));
+        }
+
+        return schema;
+    }
+
+    private static async Task<int> ReadForeignKeyViolationsAsync(string databasePath)
+    {
+        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA foreign_key_check;";
+
+        var count = 0;
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            count++;
+        }
+
+        return count;
+    }
+
+    [Fact]
+    public async Task MigrateAsync_WithDefaultProvider_AppliesOfficialMigrationsAndPreservesHistoricalV1Checksum()
     {
         var migrator = new SqliteDatabaseMigrator(_options);
 
@@ -36,16 +469,83 @@ public sealed class SqliteDatabaseMigratorTests : IDisposable
         Assert.True(result.Success);
         Assert.False(result.IsUpToDate);
         Assert.Equal(0, result.InitialVersion);
-        Assert.Equal(OfficialMigrations.InitialSchemaVersion, result.FinalVersion);
-        Assert.Single(result.AppliedMigrations);
-        Assert.Equal(OfficialMigrations.InitialSchemaVersion, result.AppliedMigrations[0].Version);
+        Assert.Equal(OfficialMigrations.GuidValidationVersion, result.FinalVersion);
+        Assert.Equal(2, result.AppliedMigrations.Count);
+        Assert.Equal(
+            OfficialMigrations.InitialSchemaVersion,
+            result.AppliedMigrations[0].Version);
+        Assert.Equal(
+            "a79092c05bda71f7cb92807110c1293c43ad0555ab1fe87d6e1820e16697298f",
+            OfficialMigrations.All[0].CalculateChecksum());
+        Assert.Equal(
+            OfficialMigrations.GuidValidationVersion,
+            result.AppliedMigrations[1].Version);
 
         var currentVersion = await migrator.GetCurrentVersionAsync();
-        Assert.Equal(OfficialMigrations.InitialSchemaVersion, currentVersion);
+        Assert.Equal(OfficialMigrations.GuidValidationVersion, currentVersion);
 
         var history = await migrator.GetAppliedMigrationsAsync();
-        Assert.Single(history);
+        Assert.Equal(2, history.Count);
         Assert.Equal(OfficialMigrations.InitialSchemaName, history[0].Name);
+        Assert.Equal(
+            "a79092c05bda71f7cb92807110c1293c43ad0555ab1fe87d6e1820e16697298f",
+            history[0].Checksum);
+        Assert.Equal(OfficialMigrations.GuidValidationName, history[1].Name);
+    }
+
+    [Fact]
+    public async Task MigrateAsync_OnNewDatabase_AssignsIdentityAndAppliesMigrations()
+    {
+        var migrations = new[]
+        {
+            new SqliteMigration(1, "v1", "CREATE TABLE migrated_data (id INTEGER PRIMARY KEY);")
+        };
+        var migrator = new SqliteDatabaseMigrator(
+            _options,
+            new StaticSqliteMigrationProvider(migrations));
+
+        var result = await migrator.MigrateAsync();
+
+        Assert.Equal(1, result.FinalVersion);
+        Assert.Equal(SqliteDatabaseMigrator.ApplicationId, await ReadApplicationIdAsync());
+        Assert.True(await TableExistsAsync("migrated_data"));
+        Assert.True(await TableExistsAsync(SqliteDatabaseMigrator.MigrationsTableName));
+    }
+
+    [Fact]
+    public async Task MigrateAsync_OnValidSubTrackDatabase_AllowsMigrations()
+    {
+        await using (var connection = new SqliteConnection($"Data Source={_databasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = $"""
+                PRAGMA application_id = {SqliteDatabaseMigrator.ApplicationId};
+                CREATE TABLE existing_data (value TEXT NOT NULL);
+                INSERT INTO existing_data (value) VALUES ('preserve-me');
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var migrations = new[]
+        {
+            new SqliteMigration(1, "v1", "CREATE TABLE migrated_data (id INTEGER PRIMARY KEY);")
+        };
+        var migrator = new SqliteDatabaseMigrator(
+            _options,
+            new StaticSqliteMigrationProvider(migrations));
+
+        var result = await migrator.MigrateAsync();
+
+        Assert.Equal(1, result.FinalVersion);
+        Assert.True(await TableExistsAsync("migrated_data"));
+        Assert.True(await TableExistsAsync(SqliteDatabaseMigrator.MigrationsTableName));
+
+        await using var verificationConnection = new SqliteConnection($"Data Source={_databasePath}");
+        await verificationConnection.OpenAsync();
+        await using var verificationCommand = verificationConnection.CreateCommand();
+        verificationCommand.CommandText = "SELECT value FROM existing_data;";
+        Assert.Equal("preserve-me", await verificationCommand.ExecuteScalarAsync());
     }
 
     [Fact]
@@ -58,8 +558,8 @@ public sealed class SqliteDatabaseMigratorTests : IDisposable
 
         Assert.True(secondResult.Success);
         Assert.True(secondResult.IsUpToDate);
-        Assert.Equal(OfficialMigrations.InitialSchemaVersion, secondResult.InitialVersion);
-        Assert.Equal(OfficialMigrations.InitialSchemaVersion, secondResult.FinalVersion);
+        Assert.Equal(OfficialMigrations.GuidValidationVersion, secondResult.InitialVersion);
+        Assert.Equal(OfficialMigrations.GuidValidationVersion, secondResult.FinalVersion);
         Assert.Empty(secondResult.AppliedMigrations);
     }
 
@@ -229,6 +729,47 @@ public sealed class SqliteDatabaseMigratorTests : IDisposable
     }
 
     [Fact]
+    public async Task MigrateAsync_WhenOnlyUserVersionIsFuture_ThrowsFutureVersion()
+    {
+        await using (var connection = new SqliteConnection($"Data Source={_databasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = $"""
+                PRAGMA application_id = {SqliteDatabaseMigrator.ApplicationId};
+                PRAGMA user_version = 3;
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var migrations = new[]
+        {
+            new SqliteMigration(1, "v1", "CREATE TABLE v1 (id INTEGER PRIMARY KEY);"),
+            new SqliteMigration(2, "v2", "CREATE TABLE v2 (id INTEGER PRIMARY KEY);")
+        };
+        var migrator = new SqliteDatabaseMigrator(
+            _options,
+            new StaticSqliteMigrationProvider(migrations));
+
+        var exception = await Assert.ThrowsAsync<SubTrackPersistenceException>(
+            () => migrator.MigrateAsync());
+
+        Assert.Equal(PersistenceFailureKind.FutureVersion, exception.Kind);
+
+        await using var verificationConnection = new SqliteConnection($"Data Source={_databasePath}");
+        await verificationConnection.OpenAsync();
+        await using var verificationCommand = verificationConnection.CreateCommand();
+        verificationCommand.CommandText = "PRAGMA user_version;";
+        Assert.Equal(3, Convert.ToInt32(await verificationCommand.ExecuteScalarAsync()));
+
+        verificationCommand.CommandText = """
+            SELECT COUNT(*)
+            FROM esquema_migraciones;
+            """;
+        Assert.Equal(0, Convert.ToInt32(await verificationCommand.ExecuteScalarAsync()));
+    }
+
+    [Fact]
     public async Task MigrateAsync_WhenMigrationScriptFails_RollsBackTransactionAndLeavesPreviousVersionIntact()
     {
         var migrations = new[]
@@ -263,6 +804,23 @@ public sealed class SqliteDatabaseMigratorTests : IDisposable
         checkCmd.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='exito';";
         var exitoCount = Convert.ToInt32(await checkCmd.ExecuteScalarAsync());
         Assert.Equal(1, exitoCount);
+
+        checkCmd.CommandText = $"""
+            SELECT COUNT(*)
+            FROM {SqliteDatabaseMigrator.MigrationsTableName}
+            WHERE version = 1;
+            """;
+        Assert.Equal(1, Convert.ToInt32(await checkCmd.ExecuteScalarAsync()));
+
+        checkCmd.CommandText = $"""
+            SELECT COUNT(*)
+            FROM {SqliteDatabaseMigrator.MigrationsTableName}
+            WHERE version = 2;
+            """;
+        Assert.Equal(0, Convert.ToInt32(await checkCmd.ExecuteScalarAsync()));
+
+        checkCmd.CommandText = "PRAGMA user_version;";
+        Assert.Equal(1, Convert.ToInt32(await checkCmd.ExecuteScalarAsync()));
     }
 
     [Fact]
@@ -307,6 +865,72 @@ public sealed class SqliteDatabaseMigratorTests : IDisposable
             () => migrator.MigrateAsync());
 
         Assert.Equal(PersistenceFailureKind.ForeignDatabase, exception.Kind);
+    }
+
+    [Fact]
+    public async Task MigrateAsync_RejectsUnidentifiedDatabaseWithSqliteXTableWithoutChangingIt()
+    {
+        await using (var connection = new SqliteConnection($"Data Source={_databasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                CREATE TABLE sqliteX_data (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+                INSERT INTO sqliteX_data (id, value) VALUES (1, 'preserve-me');
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        await AssertUnidentifiedDatabaseRejectedWithoutAdoptionAsync();
+
+        await using var verificationConnection = new SqliteConnection($"Data Source={_databasePath}");
+        await verificationConnection.OpenAsync();
+        await using var verificationCommand = verificationConnection.CreateCommand();
+        verificationCommand.CommandText = "SELECT value FROM sqliteX_data WHERE id = 1;";
+        Assert.Equal("preserve-me", await verificationCommand.ExecuteScalarAsync());
+    }
+
+    [Fact]
+    public async Task MigrateAsync_RejectsUnidentifiedDatabaseWithOnlyUserViewWithoutChangingIt()
+    {
+        await using (var connection = new SqliteConnection($"Data Source={_databasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "CREATE VIEW foreign_view AS SELECT 'preserve-me' AS value;";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        await AssertUnidentifiedDatabaseRejectedWithoutAdoptionAsync();
+
+        await using var verificationConnection = new SqliteConnection($"Data Source={_databasePath}");
+        await verificationConnection.OpenAsync();
+        await using var verificationCommand = verificationConnection.CreateCommand();
+        verificationCommand.CommandText = "SELECT value FROM foreign_view;";
+        Assert.Equal("preserve-me", await verificationCommand.ExecuteScalarAsync());
+    }
+
+    [Fact]
+    public async Task MigrateAsync_RejectsUnidentifiedDatabaseWithOrdinaryTableAndPreservesData()
+    {
+        await using (var connection = new SqliteConnection($"Data Source={_databasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                CREATE TABLE foreign_records (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+                INSERT INTO foreign_records (id, value) VALUES (1, 'preserve-me');
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        await AssertUnidentifiedDatabaseRejectedWithoutAdoptionAsync();
+
+        await using var verificationConnection = new SqliteConnection($"Data Source={_databasePath}");
+        await verificationConnection.OpenAsync();
+        await using var verificationCommand = verificationConnection.CreateCommand();
+        verificationCommand.CommandText = "SELECT value FROM foreign_records WHERE id = 1;";
+        Assert.Equal("preserve-me", await verificationCommand.ExecuteScalarAsync());
     }
 
     [Fact]
@@ -409,6 +1033,40 @@ public sealed class SqliteDatabaseMigratorTests : IDisposable
         Assert.Equal(checksumLf, checksumCrlf);
         Assert.Equal(checksumLf, checksumCr);
         Assert.Equal(64, checksumLf.Length);
+    }
+
+    private async Task AssertUnidentifiedDatabaseRejectedWithoutAdoptionAsync()
+    {
+        var migrator = new SqliteDatabaseMigrator(_options);
+        var exception = await Assert.ThrowsAsync<SubTrackPersistenceException>(
+            () => migrator.MigrateAsync());
+
+        Assert.Equal(PersistenceFailureKind.ForeignDatabase, exception.Kind);
+        Assert.Equal(0L, await ReadApplicationIdAsync());
+        Assert.False(await TableExistsAsync(SqliteDatabaseMigrator.MigrationsTableName));
+    }
+
+    private async Task<long> ReadApplicationIdAsync()
+    {
+        await using var connection = new SqliteConnection($"Data Source={_databasePath}");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA application_id;";
+        return Convert.ToInt64(await command.ExecuteScalarAsync());
+    }
+
+    private async Task<bool> TableExistsAsync(string tableName)
+    {
+        await using var connection = new SqliteConnection($"Data Source={_databasePath}");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT EXISTS (
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = $name);
+            """;
+        command.Parameters.AddWithValue("$name", tableName);
+        return Convert.ToInt64(await command.ExecuteScalarAsync()) != 0;
     }
 
     public void Dispose()

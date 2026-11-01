@@ -1,3 +1,5 @@
+using System.Text;
+
 namespace SubTrack.Infrastructure.Persistence;
 
 /// <summary>
@@ -7,8 +9,8 @@ namespace SubTrack.Infrastructure.Persistence;
 /// </summary>
 /// <remarks>
 /// Cada restricción del esquema referencia la decisión que la origina para permitir
-/// trazabilidad durante la revisión humana. El contrato C# de Core (entidades e
-/// interfaces) sigue pendiente; este esquema solo fija las garantías de SQLite.
+/// trazabilidad durante la revisión humana. Las entidades e interfaces de Core definen
+/// los contratos que los repositorios implementan sobre estas garantías de SQLite.
 /// </remarks>
 internal static class OfficialMigrations
 {
@@ -17,6 +19,9 @@ internal static class OfficialMigrations
 
     /// <summary>Nombre estable de la migración inicial (aparece en esquema_migraciones).</summary>
     public const string InitialSchemaName = "esquema_inicial_dominio";
+
+    public const int GuidValidationVersion = 2;
+    public const string GuidValidationName = "validacion_guid_y_pago_vigente";
 
     /// <summary>
     /// DDL de la migración 0001.
@@ -508,9 +513,164 @@ internal static class OfficialMigrations
             ON suscripcion_versiones (suscripcion_id, vigente_desde);
         """;
 
+    private static string BuildGuidValidationSql()
+    {
+        var guidColumns = new (string Table, (string Name, bool Nullable)[] Columns)[]
+        {
+            ("categorias_gasto", [("id", false)]),
+            ("suscripciones", [("id", false), ("operacion_id", false)]),
+            ("suscripcion_versiones", [("id", false), ("suscripcion_id", false)]),
+            ("cobros_programados", [("id", false), ("suscripcion_id", false)]),
+            ("pagos", [("id", false), ("cobro_id", false), ("operacion_id", false)]),
+            ("gastos", [("id", false), ("categoria_id", false), ("operacion_id", false)]),
+            ("gastos_historial",
+                [
+                    ("id", false),
+                    ("gasto_id", false),
+                    ("categoria_anterior_id", true),
+                    ("categoria_nueva_id", true)
+                ]),
+            ("ingresos_plantillas", [("id", false), ("operacion_id", false)]),
+            ("ingresos", [("id", false), ("plantilla_id", true), ("operacion_id", false)]),
+            ("ingresos_historial", [("id", false), ("ingreso_id", false)]),
+            ("saldo_inicial_historial", [("id", false)])
+        };
+
+        var sql = new StringBuilder(
+            """
+            CREATE TEMP TABLE __subtrack_v2_guid_validation (is_valid INTEGER NOT NULL);
+            CREATE TEMP TRIGGER __subtrack_v2_guid_validation_failed
+            BEFORE INSERT ON __subtrack_v2_guid_validation
+            WHEN NEW.is_valid = 0
+            BEGIN
+                SELECT RAISE(ABORT, 'V2 migration aborted: existing rows contain invalid GUID values; no data was changed.');
+            END;
+            """);
+
+        foreach (var (table, columns) in guidColumns)
+        {
+            var invalidExistingData = string.Join(
+                " OR ",
+                columns.Select(column => InvalidGuidExpression(column.Name, column.Nullable)));
+
+            sql.AppendLine();
+            sql.Append("INSERT INTO __subtrack_v2_guid_validation (is_valid) ");
+            sql.Append("SELECT CASE WHEN EXISTS (SELECT 1 FROM ");
+            sql.Append(QuoteIdentifier(table));
+            sql.Append(" WHERE ");
+            sql.Append(invalidExistingData);
+            sql.AppendLine(") THEN 0 ELSE 1 END;");
+        }
+
+        sql.AppendLine(
+            """
+            CREATE TEMP TABLE __subtrack_v2_payment_validation (is_valid INTEGER NOT NULL);
+            CREATE TEMP TRIGGER __subtrack_v2_payment_validation_failed
+            BEFORE INSERT ON __subtrack_v2_payment_validation
+            WHEN NEW.is_valid = 0
+            BEGIN
+                SELECT RAISE(ABORT, 'V2 migration aborted: existing VIGENTE payments must reference an existing scheduled charge and match its amount; no data was changed.');
+            END;
+            INSERT INTO __subtrack_v2_payment_validation (is_valid)
+            SELECT CASE WHEN EXISTS (
+                SELECT 1
+                FROM pagos AS p
+                LEFT JOIN cobros_programados AS c ON c.id = p.cobro_id
+                WHERE p.estado = 'VIGENTE'
+                  AND (c.id IS NULL OR c.monto_centavos IS NULL
+                       OR c.monto_centavos <> p.monto_centavos)
+            ) THEN 0 ELSE 1 END;
+            DROP TRIGGER temp.__subtrack_v2_payment_validation_failed;
+            DROP TABLE temp.__subtrack_v2_payment_validation;
+            """);
+
+        sql.AppendLine("DROP TRIGGER temp.__subtrack_v2_guid_validation_failed;");
+        sql.AppendLine("DROP TABLE temp.__subtrack_v2_guid_validation;");
+
+        sql.AppendLine("DROP TRIGGER trg_pagos_importe_completo;");
+        sql.AppendLine(
+            """
+            CREATE TRIGGER trg_pagos_importe_completo
+            BEFORE INSERT ON pagos
+            WHEN NEW.estado = 'VIGENTE'
+            BEGIN
+                SELECT RAISE(ABORT, 'El importe del pago debe coincidir exactamente con el importe del cobro programado.')
+                WHERE COALESCE(
+                    (SELECT monto_centavos FROM cobros_programados WHERE id = NEW.cobro_id),
+                    -1) <> NEW.monto_centavos;
+            END;
+            """);
+        sql.AppendLine("DROP TRIGGER trg_pagos_importe_completo_update;");
+        sql.AppendLine(
+            """
+            CREATE TRIGGER trg_pagos_importe_completo_update
+            BEFORE UPDATE OF estado, monto_centavos, cobro_id ON pagos
+            WHEN NEW.estado = 'VIGENTE'
+            BEGIN
+                SELECT RAISE(ABORT, 'El importe del pago debe coincidir exactamente con el importe del cobro programado.')
+                WHERE COALESCE(
+                    (SELECT monto_centavos FROM cobros_programados WHERE id = NEW.cobro_id),
+                    -1) <> NEW.monto_centavos;
+            END;
+            """);
+
+        foreach (var (table, columns) in guidColumns)
+        {
+            var invalidNewData = string.Join(
+                " OR ",
+                columns.Select(column => InvalidGuidExpression($"NEW.{column.Name}", column.Nullable)));
+            var updatedColumns = string.Join(", ", columns.Select(column => QuoteIdentifier(column.Name)));
+            var tableIdentifier = QuoteIdentifier(table);
+
+            sql.AppendLine();
+            sql.Append("CREATE TRIGGER ");
+            sql.Append(QuoteIdentifier($"trg_v2_guid_{table}_insert"));
+            sql.Append(" BEFORE INSERT ON ");
+            sql.Append(tableIdentifier);
+            sql.AppendLine();
+            sql.Append("WHEN ");
+            sql.Append(invalidNewData);
+            sql.AppendLine();
+            sql.AppendLine("BEGIN");
+            sql.AppendLine(
+                $"    SELECT RAISE(ABORT, 'V2 GUID validation failed for {table}; GUID values must be lowercase 8-4-4-4-12 hexadecimal.');");
+            sql.AppendLine("END;");
+
+            sql.AppendLine();
+            sql.Append("CREATE TRIGGER ");
+            sql.Append(QuoteIdentifier($"trg_v2_guid_{table}_update"));
+            sql.Append(" BEFORE UPDATE OF ");
+            sql.Append(updatedColumns);
+            sql.Append(" ON ");
+            sql.Append(tableIdentifier);
+            sql.AppendLine();
+            sql.Append("WHEN ");
+            sql.Append(invalidNewData);
+            sql.AppendLine();
+            sql.AppendLine("BEGIN");
+            sql.AppendLine(
+                $"    SELECT RAISE(ABORT, 'V2 GUID validation failed for {table}; GUID values must be lowercase 8-4-4-4-12 hexadecimal.');");
+            sql.AppendLine("END;");
+        }
+
+        return sql.ToString();
+    }
+
+    private static string InvalidGuidExpression(string value, bool nullable) =>
+        $"{(nullable ? $"{value} IS NOT NULL AND " : string.Empty)}NOT (" +
+        $"length({value}) = 36 AND {value} = lower({value}) " +
+        $"AND substr({value}, 9, 1) = '-' AND substr({value}, 14, 1) = '-' " +
+        $"AND substr({value}, 19, 1) = '-' AND substr({value}, 24, 1) = '-' " +
+        $"AND length(replace({value}, '-', '')) = 32 " +
+        $"AND replace({value}, '-', '') NOT GLOB '*[^0-9a-f]*')";
+
+    private static string QuoteIdentifier(string value) =>
+        $"\"{value.Replace("\"", "\"\"")}\"";
+
     /// <summary>Migraciones oficiales ordenadas por versión.</summary>
     public static readonly IReadOnlyList<SqliteMigration> All =
     [
-        new SqliteMigration(InitialSchemaVersion, InitialSchemaName, InitialSchemaSql)
+        new SqliteMigration(InitialSchemaVersion, InitialSchemaName, InitialSchemaSql),
+        new SqliteMigration(GuidValidationVersion, GuidValidationName, BuildGuidValidationSql())
     ];
 }

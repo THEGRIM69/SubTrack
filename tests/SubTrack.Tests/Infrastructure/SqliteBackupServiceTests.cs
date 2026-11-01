@@ -85,6 +85,70 @@ public sealed class SqliteBackupServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task CreateBackupAsync_IncludesCommittedDataStillInWal()
+    {
+        await InitializeDatabaseWithSampleDataAsync();
+        await using var activeConnection = new SqliteConnection(
+            $"Data Source={_databasePath};Pooling=False");
+        await activeConnection.OpenAsync();
+
+        await using (var setupCommand = activeConnection.CreateCommand())
+        {
+            setupCommand.CommandText = "PRAGMA wal_autocheckpoint = 0;";
+            await setupCommand.ExecuteNonQueryAsync();
+        }
+
+        await using (var insertCommand = activeConnection.CreateCommand())
+        {
+            insertCommand.CommandText = "INSERT INTO muestras (valor) VALUES ('en-wal');";
+            await insertCommand.ExecuteNonQueryAsync();
+        }
+
+        Assert.True(File.Exists(_databasePath + "-wal"));
+
+        var service = new SqliteBackupService(_dbOptions, _backupOptions);
+        var backup = await service.CreateBackupAsync();
+
+        await using var backupConnection = new SqliteConnection(
+            $"Data Source={backup.BackupPath};Mode=ReadOnly");
+        await backupConnection.OpenAsync();
+        await using var countCommand = backupConnection.CreateCommand();
+        countCommand.CommandText = "SELECT COUNT(*) FROM muestras;";
+
+        Assert.Equal(3, Convert.ToInt32(await countCommand.ExecuteScalarAsync()));
+    }
+
+    [Fact]
+    public async Task CreateBackupAsync_AtomicallyReplacesAnExistingBackup()
+    {
+        await InitializeDatabaseWithSampleDataAsync();
+        var service = new SqliteBackupService(_dbOptions, _backupOptions);
+        var originalBackup = await service.CreateBackupAsync();
+
+        await using (var connection = new SqliteConnection($"Data Source={_databasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "INSERT INTO muestras (valor) VALUES ('nuevo');";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var replacement = await service.CreateBackupAsync(originalBackup.BackupPath);
+
+        Assert.Equal(originalBackup.BackupPath, replacement.BackupPath);
+        var verification = await service.VerifyBackupAsync(replacement.BackupPath);
+        Assert.True(verification.IsValid);
+
+        await using var backupConnection = new SqliteConnection(
+            $"Data Source={replacement.BackupPath};Mode=ReadOnly");
+        await backupConnection.OpenAsync();
+        await using var countCommand = backupConnection.CreateCommand();
+        countCommand.CommandText = "SELECT COUNT(*) FROM muestras;";
+
+        Assert.Equal(3, Convert.ToInt32(await countCommand.ExecuteScalarAsync()));
+    }
+
+    [Fact]
     public async Task VerifyBackupAsync_ValidatesCorrectly_AndRejectsInvalidOrCorruptedFiles()
     {
         await InitializeDatabaseWithSampleDataAsync();
@@ -134,6 +198,54 @@ public sealed class SqliteBackupServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task VerifyAndRestoreBackupAsync_WithForeignKeyViolation_RejectsBackupAndPreservesActiveDatabase()
+    {
+        await InitializeDatabaseWithSampleDataAsync();
+        await AddSampleAsync("active-original");
+
+        var invalidBackupPath = Path.Combine(_backupDirectory, "orphaned-backup.db");
+        await using (var connection = new SqliteConnection(
+                         new SqliteConnectionStringBuilder
+                         {
+                             DataSource = invalidBackupPath,
+                             Mode = SqliteOpenMode.ReadWriteCreate,
+                             Pooling = false
+                         }.ToString()))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = $"""
+                PRAGMA foreign_keys = OFF;
+                PRAGMA application_id = {SqliteBackupService.ExpectedApplicationId};
+                PRAGMA user_version = 1;
+                CREATE TABLE parents (id INTEGER PRIMARY KEY);
+                CREATE TABLE children (
+                    parent_id INTEGER NOT NULL REFERENCES parents(id)
+                );
+                INSERT INTO children (parent_id) VALUES (42);
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var service = new SqliteBackupService(_dbOptions, _backupOptions);
+        var verification = await service.VerifyBackupAsync(invalidBackupPath);
+
+        Assert.False(verification.IsValid);
+        Assert.Equal("foreign_key_violation", verification.IntegrityStatus);
+        Assert.Contains("children", verification.FailureReason);
+
+        var exception = await Assert.ThrowsAsync<SubTrackPersistenceException>(
+            () => service.RestoreBackupAsync(invalidBackupPath));
+
+        Assert.Equal(PersistenceFailureKind.InvalidBackup, exception.Kind);
+        Assert.Equal(3, await ReadSampleCountAsync());
+        Assert.Contains("active-original", await ReadSampleValuesAsync());
+        Assert.Empty(Directory.GetFiles(
+            Path.GetDirectoryName(_databasePath)!,
+            "*.pre_restore_*.bak"));
+    }
+
+    [Fact]
     public async Task RestoreBackupAsync_ReplacesActiveDatabaseSafely()
     {
         await InitializeDatabaseWithSampleDataAsync();
@@ -170,6 +282,18 @@ public sealed class SqliteBackupServiceTests : IDisposable
         Assert.NotNull(restoreResult.SafetyBackupPath);
         Assert.True(File.Exists(restoreResult.SafetyBackupPath));
 
+        var safetyVerification = await service.VerifyBackupAsync(restoreResult.SafetyBackupPath);
+        Assert.True(safetyVerification.IsValid);
+
+        await using (var safetyConnection = new SqliteConnection(
+                         $"Data Source={restoreResult.SafetyBackupPath};Mode=ReadOnly"))
+        {
+            await safetyConnection.OpenAsync();
+            await using var safetyCountCommand = safetyConnection.CreateCommand();
+            safetyCountCommand.CommandText = "SELECT COUNT(*) FROM muestras;";
+            Assert.Equal(5, Convert.ToInt32(await safetyCountCommand.ExecuteScalarAsync()));
+        }
+
         // Verificar que la base restaurada volvió a tener exactamente 2 registros
         await using (var restoredConn = new SqliteConnection($"Data Source={_databasePath}"))
         {
@@ -185,6 +309,167 @@ public sealed class SqliteBackupServiceTests : IDisposable
             var journal = (string?)await journalCmd.ExecuteScalarAsync();
             Assert.Equal("wal", journal, ignoreCase: true);
         }
+    }
+
+    [Fact]
+    public async Task RestoreBackupAsync_WhenSafetySnapshotCreationFails_PreservesActiveDatabase()
+    {
+        await InitializeDatabaseWithSampleDataAsync();
+        var standardService = new SqliteBackupService(_dbOptions, _backupOptions);
+        var candidateBackup = await standardService.CreateBackupAsync();
+        await AddSampleAsync("active-original");
+
+        string? stagingPath = null;
+        var service = CreateServiceWithFaultInjector((point, path) =>
+        {
+            if (point == SqliteBackupFaultPoint.AfterSafetySnapshotCreation)
+            {
+                stagingPath = path;
+                Assert.True(File.Exists(path));
+                Assert.True(new FileInfo(path).Length > 0);
+                throw new IOException("Simulated failure after VACUUM INTO created the snapshot.");
+            }
+        });
+
+        await Assert.ThrowsAsync<SubTrackPersistenceException>(
+            () => service.RestoreBackupAsync(candidateBackup.BackupPath));
+
+        Assert.NotNull(stagingPath);
+        Assert.False(File.Exists(stagingPath));
+        Assert.Empty(Directory.GetFiles(
+            Path.GetDirectoryName(_databasePath)!,
+            "*.pre_restore_*.bak"));
+
+        await using (var connection = new SqliteConnection($"Data Source={_databasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT COUNT(*)
+                FROM sqlite_master
+                WHERE type = 'table' AND name IN ('muestras', 'esquema_migraciones');
+                """;
+            Assert.Equal(2, Convert.ToInt32(await command.ExecuteScalarAsync()));
+        }
+
+        Assert.Equal(3, await ReadSampleCountAsync());
+        Assert.Contains("active-original", await ReadSampleValuesAsync());
+    }
+
+    [Fact]
+    public async Task RestoreBackupAsync_WhenSafetySnapshotValidationFails_DoesNotUsePartialFile()
+    {
+        await InitializeDatabaseWithSampleDataAsync();
+        var standardService = new SqliteBackupService(_dbOptions, _backupOptions);
+        var candidateBackup = await standardService.CreateBackupAsync();
+        await AddSampleAsync("active-original");
+
+        var service = CreateServiceWithFaultInjector((point, path) =>
+        {
+            if (point == SqliteBackupFaultPoint.BeforeSafetySnapshotValidation)
+            {
+                File.WriteAllText(path, "partial-invalid-snapshot");
+            }
+        });
+
+        var exception = await Assert.ThrowsAsync<SubTrackPersistenceException>(
+            () => service.RestoreBackupAsync(candidateBackup.BackupPath));
+
+        Assert.Equal(PersistenceFailureKind.RestoreFailed, exception.Kind);
+        Assert.Equal(3, await ReadSampleCountAsync());
+        Assert.Contains("active-original", await ReadSampleValuesAsync());
+        Assert.Empty(Directory.GetFiles(Path.GetDirectoryName(_databasePath)!, "*.pre_restore_*.bak"));
+    }
+
+    [Fact]
+    public async Task RestoreBackupAsync_WhenFailureOccursAfterReplacement_RecoversOriginalDatabase()
+    {
+        await InitializeDatabaseWithSampleDataAsync();
+        var standardService = new SqliteBackupService(_dbOptions, _backupOptions);
+        var candidateBackup = await standardService.CreateBackupAsync();
+        await AddSampleAsync("active-original");
+
+        var service = CreateServiceWithFaultInjector((point, _) =>
+        {
+            if (point == SqliteBackupFaultPoint.AfterRestoredDatabaseReplacement)
+            {
+                throw new IOException("Simulated failure after replacing active database.");
+            }
+        });
+
+        await Assert.ThrowsAsync<SubTrackPersistenceException>(
+            () => service.RestoreBackupAsync(candidateBackup.BackupPath));
+
+        Assert.Equal(3, await ReadSampleCountAsync());
+        Assert.Contains("active-original", await ReadSampleValuesAsync());
+
+        var safetyPath = Assert.Single(
+            Directory.GetFiles(Path.GetDirectoryName(_databasePath)!, "*.pre_restore_*.bak"));
+        var verification = await standardService.VerifyBackupAsync(safetyPath);
+        Assert.True(verification.IsValid);
+
+        await using var safetyConnection = new SqliteConnection(
+            $"Data Source={safetyPath};Mode=ReadOnly");
+        await safetyConnection.OpenAsync();
+        await using var safetyCommand = safetyConnection.CreateCommand();
+        safetyCommand.CommandText = "SELECT COUNT(*) FROM muestras;";
+        Assert.Equal(3, Convert.ToInt32(await safetyCommand.ExecuteScalarAsync()));
+    }
+
+    [Fact]
+    public async Task RestoreBackupAsync_WhenRecoveryFails_KeepsValidatedSafetyBackupForManualRecovery()
+    {
+        await InitializeDatabaseWithSampleDataAsync();
+        var standardService = new SqliteBackupService(_dbOptions, _backupOptions);
+        var candidateBackup = await standardService.CreateBackupAsync();
+        await AddSampleAsync("active-original");
+
+        var service = CreateServiceWithFaultInjector((point, _) =>
+        {
+            if (point == SqliteBackupFaultPoint.AfterRestoredDatabaseReplacement
+                || point == SqliteBackupFaultPoint.BeforeRecoveryDatabaseInitialization)
+            {
+                throw new IOException($"Simulated failure at {point}.");
+            }
+        });
+
+        var exception = await Assert.ThrowsAsync<SubTrackPersistenceException>(
+            () => service.RestoreBackupAsync(candidateBackup.BackupPath));
+
+        Assert.Equal(PersistenceFailureKind.RestoreFailed, exception.Kind);
+
+        await using (var activeConnection = new SqliteConnection($"Data Source={_databasePath}"))
+        {
+            await activeConnection.OpenAsync();
+            await using var activeCommand = activeConnection.CreateCommand();
+            activeCommand.CommandText = """
+                SELECT COUNT(*)
+                FROM sqlite_master
+                WHERE type = 'table' AND name IN ('muestras', 'esquema_migraciones');
+                """;
+            Assert.Equal(2, Convert.ToInt32(await activeCommand.ExecuteScalarAsync()));
+
+            activeCommand.CommandText = "SELECT COUNT(*) FROM muestras;";
+            Assert.Equal(3, Convert.ToInt32(await activeCommand.ExecuteScalarAsync()));
+
+            activeCommand.CommandText =
+                "SELECT COUNT(*) FROM muestras WHERE valor = 'active-original';";
+            Assert.Equal(1, Convert.ToInt32(await activeCommand.ExecuteScalarAsync()));
+        }
+
+        var safetyPath = Assert.Single(
+            Directory.GetFiles(Path.GetDirectoryName(_databasePath)!, "*.pre_restore_*.bak"));
+        var verification = await standardService.VerifyBackupAsync(safetyPath);
+        Assert.True(verification.IsValid);
+
+        await using var safetyConnection = new SqliteConnection(
+            $"Data Source={safetyPath};Mode=ReadOnly");
+        await safetyConnection.OpenAsync();
+        await using var safetyCommand = safetyConnection.CreateCommand();
+        safetyCommand.CommandText = "SELECT COUNT(*) FROM muestras;";
+        Assert.Equal(3, Convert.ToInt32(await safetyCommand.ExecuteScalarAsync()));
+        safetyCommand.CommandText = "SELECT COUNT(*) FROM muestras WHERE valor = 'active-original';";
+        Assert.Equal(1, Convert.ToInt32(await safetyCommand.ExecuteScalarAsync()));
     }
 
     [Fact]
@@ -226,17 +511,129 @@ public sealed class SqliteBackupServiceTests : IDisposable
         await Task.Delay(15);
         var backup3 = await service.CreateBackupAsync();
 
+        var unrelatedDatabasePath = Path.Combine(_backupDirectory, "other_application.db");
+        await using (var unrelatedConnection = new SqliteConnection(
+                         $"Data Source={unrelatedDatabasePath}"))
+        {
+            await unrelatedConnection.OpenAsync();
+            await using var command = unrelatedConnection.CreateCommand();
+            command.CommandText = "CREATE TABLE unrelated (id INTEGER PRIMARY KEY);";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var temporaryFilePath = Path.Combine(
+            _backupDirectory,
+            "test_backup_20261101_120000_000.db.staging.tmp");
+        await File.WriteAllTextAsync(temporaryFilePath, "temporary");
+
+        var malformedBackupPath = Path.Combine(_backupDirectory, "test_backup_not-a-timestamp.db");
+        await File.WriteAllTextAsync(malformedBackupPath, "not an official backup");
+
         var list = await service.ListBackupsAsync();
-        Assert.True(list.Count >= 3);
+        Assert.Equal(3, list.Count);
         // Debe estar ordenado de más reciente a más antiguo
         Assert.True(list[0].CreatedAt >= list[1].CreatedAt);
 
         // Podar conservando únicamente los 2 más recientes
         var prunedCount = await service.PruneBackupsAsync(keepCount: 2);
-        Assert.True(prunedCount >= 1);
+        Assert.Equal(1, prunedCount);
 
         var listAfterPrune = await service.ListBackupsAsync();
         Assert.Equal(2, listAfterPrune.Count);
+        Assert.True(File.Exists(unrelatedDatabasePath));
+        Assert.True(File.Exists(temporaryFilePath));
+        Assert.True(File.Exists(malformedBackupPath));
+        Assert.False(File.Exists(backup1.BackupPath));
+        Assert.True(File.Exists(backup2.BackupPath));
+        Assert.True(File.Exists(backup3.BackupPath));
+    }
+
+    [Fact]
+    public async Task PruneBackupsAsync_DoesNotDeleteActiveDatabaseMatchingBackupNameFormat()
+    {
+        var activeDatabasePath = Path.Combine(
+            _backupDirectory,
+            "test_backup_20000101_000000_000.db");
+        var databaseOptions = new SubTrackDatabaseOptions
+        {
+            DatabasePath = activeDatabasePath,
+            BusyTimeoutMilliseconds = 3_000
+        };
+        await new SqliteDatabaseInitializer(databaseOptions).InitializeAsync();
+
+        var service = new SqliteBackupService(databaseOptions, _backupOptions);
+        var createdBackup = await service.CreateBackupAsync();
+
+        var prunedCount = await service.PruneBackupsAsync(keepCount: 1);
+
+        Assert.Equal(0, prunedCount);
+        Assert.True(File.Exists(activeDatabasePath));
+        Assert.True(File.Exists(createdBackup.BackupPath));
+        Assert.Single(await service.ListBackupsAsync());
+        Assert.Equal(createdBackup.BackupPath, (await service.ListBackupsAsync()).Single().FilePath);
+    }
+
+    [Fact]
+    public async Task PruneBackupsAsync_WhenBackupCannotBeDeleted_ReportsPersistenceFailure()
+    {
+        await InitializeDatabaseWithSampleDataAsync();
+        var service = new SqliteBackupService(_dbOptions, _backupOptions);
+
+        await service.CreateBackupAsync();
+        await Task.Delay(15);
+        await service.CreateBackupAsync();
+
+        var oldestBackup = (await service.ListBackupsAsync()).Last();
+        using var lockedBackup = new FileStream(
+            oldestBackup.FilePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.None);
+
+        var exception = await Assert.ThrowsAsync<SubTrackPersistenceException>(
+            () => service.PruneBackupsAsync(keepCount: 1));
+
+        Assert.Equal(PersistenceFailureKind.IoError, exception.Kind);
+        Assert.Equal(oldestBackup.FilePath, exception.DatabasePath);
+    }
+
+    private SqliteBackupService CreateServiceWithFaultInjector(
+        Action<SqliteBackupFaultPoint, string> faultInjector) =>
+        new(_dbOptions, _backupOptions, faultInjector);
+
+    private async Task AddSampleAsync(string value)
+    {
+        await using var connection = new SqliteConnection($"Data Source={_databasePath}");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "INSERT INTO muestras (valor) VALUES ($value);";
+        command.Parameters.AddWithValue("$value", value);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    private async Task<int> ReadSampleCountAsync()
+    {
+        await using var connection = new SqliteConnection($"Data Source={_databasePath}");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM muestras;";
+        return Convert.ToInt32(await command.ExecuteScalarAsync());
+    }
+
+    private async Task<IReadOnlyList<string>> ReadSampleValuesAsync()
+    {
+        await using var connection = new SqliteConnection($"Data Source={_databasePath}");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT valor FROM muestras ORDER BY id;";
+        var values = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            values.Add(reader.GetString(0));
+        }
+
+        return values;
     }
 
     public void Dispose()

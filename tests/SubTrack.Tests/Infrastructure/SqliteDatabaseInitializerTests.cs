@@ -125,6 +125,92 @@ public sealed class SqliteDatabaseInitializerTests : IDisposable
     }
 
     [Fact]
+    public async Task InitializeAsync_RejectsUnidentifiedDatabaseWithExistingTables()
+    {
+        await using (var connection = new SqliteConnection($"Data Source={_databasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                CREATE TABLE sqliteX_data (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+                INSERT INTO sqliteX_data (id, value) VALUES (1, 'preserve-me');
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var initializer = new SqliteDatabaseInitializer(_options);
+        var exception = await Assert.ThrowsAsync<SubTrackPersistenceException>(
+            () => initializer.InitializeAsync());
+
+        Assert.Equal(PersistenceFailureKind.ForeignDatabase, exception.Kind);
+
+        await using var verificationConnection = new SqliteConnection($"Data Source={_databasePath}");
+        await verificationConnection.OpenAsync();
+        await using var verificationCommand = verificationConnection.CreateCommand();
+        verificationCommand.CommandText = "PRAGMA application_id;";
+
+        Assert.Equal(0L, Convert.ToInt64(await verificationCommand.ExecuteScalarAsync()));
+
+        verificationCommand.CommandText = "SELECT value FROM sqliteX_data WHERE id = 1;";
+        Assert.Equal("preserve-me", await verificationCommand.ExecuteScalarAsync());
+    }
+
+    [Fact]
+    public async Task InitializeAsync_RejectsUnidentifiedDatabaseWithOnlyUserView()
+    {
+        await using (var connection = new SqliteConnection($"Data Source={_databasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "CREATE VIEW foreign_view AS SELECT 'preserve-me' AS value;";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var initializer = new SqliteDatabaseInitializer(_options);
+        var exception = await Assert.ThrowsAsync<SubTrackPersistenceException>(
+            () => initializer.InitializeAsync());
+
+        Assert.Equal(PersistenceFailureKind.ForeignDatabase, exception.Kind);
+
+        await using var verificationConnection = new SqliteConnection($"Data Source={_databasePath}");
+        await verificationConnection.OpenAsync();
+        await using var verificationCommand = verificationConnection.CreateCommand();
+        verificationCommand.CommandText = "PRAGMA application_id;";
+        Assert.Equal(0L, Convert.ToInt64(await verificationCommand.ExecuteScalarAsync()));
+
+        verificationCommand.CommandText = "SELECT value FROM foreign_view;";
+        Assert.Equal("preserve-me", await verificationCommand.ExecuteScalarAsync());
+    }
+
+    [Fact]
+    public async Task InitializeAsync_OpensExistingSubTrackDatabaseWithoutChangingData()
+    {
+        await using (var connection = new SqliteConnection($"Data Source={_databasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = $"""
+                PRAGMA application_id = {SqliteDatabaseInitializer.ApplicationId};
+                CREATE TABLE existing_data (value TEXT NOT NULL);
+                INSERT INTO existing_data (value) VALUES ('preserve-me');
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var initializer = new SqliteDatabaseInitializer(_options);
+        var result = await initializer.InitializeAsync();
+
+        Assert.Equal(SqliteDatabaseInitializer.ApplicationId, result.ApplicationId);
+        Assert.Equal("wal", result.JournalMode, ignoreCase: true);
+
+        await using var verificationConnection = new SqliteConnection($"Data Source={_databasePath}");
+        await verificationConnection.OpenAsync();
+        await using var verificationCommand = verificationConnection.CreateCommand();
+        verificationCommand.CommandText = "SELECT value FROM existing_data;";
+        Assert.Equal("preserve-me", await verificationCommand.ExecuteScalarAsync());
+    }
+
+    [Fact]
     public async Task InitializeAsync_RejectsNonSqliteFile()
     {
         await File.WriteAllTextAsync(_databasePath, "esto no es una base de datos SQLite");

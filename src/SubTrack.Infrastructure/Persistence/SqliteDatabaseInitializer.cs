@@ -175,6 +175,25 @@ public sealed class SqliteDatabaseInitializer
 
         if (currentApplicationId == 0)
         {
+            var hasApplicationObjects = await ExecuteScalarInt64Async(
+                connection,
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM sqlite_master
+                    WHERE type IN ('table', 'view')
+                      AND lower(substr(name, 1, 7)) <> 'sqlite_');
+                """,
+                cancellationToken).ConfigureAwait(false);
+
+            if (hasApplicationObjects != 0)
+            {
+                throw new SubTrackPersistenceException(
+                    "El archivo SQLite contiene objetos de otra aplicación y no tiene identidad de SubTrack.",
+                    PersistenceFailureKind.ForeignDatabase,
+                    _options.DatabasePath);
+            }
+
             await ExecuteNonQueryAsync(
                 connection,
                 $"PRAGMA application_id = {ApplicationId};",

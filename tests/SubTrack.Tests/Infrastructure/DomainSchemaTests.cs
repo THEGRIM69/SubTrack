@@ -4,7 +4,7 @@ using SubTrack.Infrastructure.Persistence;
 namespace SubTrack.Tests.Infrastructure;
 
 /// <summary>
-/// Verifica las garantías de integridad del esquema de dominio (migración 0001).
+/// Verifica las garantías de integridad del esquema de dominio.
 /// Cada prueba intenta violar una restricción aprobada en las 75 decisiones de SubTrack 1.0
 /// y comprueba que SQLite la rechaza.
 /// </summary>
@@ -14,6 +14,7 @@ public sealed class DomainSchemaTests : IAsyncLifetime
     private const string SuscripcionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     private const string CobroId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     private const string CategoriaId = "11111111-1111-4111-8111-111111111111";
+    private const string InvalidGuid = "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz";
 
     private readonly string _tempDirectory;
     private readonly SubTrackDatabaseOptions _options;
@@ -40,7 +41,7 @@ public sealed class DomainSchemaTests : IAsyncLifetime
         var result = await migrator.MigrateAsync();
 
         Assert.True(result.Success);
-        Assert.Equal(OfficialMigrations.InitialSchemaVersion, result.FinalVersion);
+        Assert.Equal(OfficialMigrations.GuidValidationVersion, result.FinalVersion);
     }
 
     public Task DisposeAsync()
@@ -107,18 +108,18 @@ public sealed class DomainSchemaTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task MigracionInicial_RegistraVersionUnoEnLaBase()
+    public async Task MigracionesOficiales_RegistranLaVersionActualEnLaBase()
     {
         var migrator = new SqliteDatabaseMigrator(_options);
 
-        Assert.Equal(OfficialMigrations.InitialSchemaVersion, await migrator.GetCurrentVersionAsync());
+        Assert.Equal(OfficialMigrations.GuidValidationVersion, await migrator.GetCurrentVersionAsync());
 
         await using var connection = await OpenAsync();
         await using var command = connection.CreateCommand();
         command.CommandText = "PRAGMA user_version;";
 
         var userVersion = Convert.ToInt32(await command.ExecuteScalarAsync());
-        Assert.Equal(OfficialMigrations.InitialSchemaVersion, userVersion);
+        Assert.Equal(OfficialMigrations.GuidValidationVersion, userVersion);
     }
 
     // -------------------------------------------------------------------------
@@ -155,7 +156,224 @@ public sealed class DomainSchemaTests : IAsyncLifetime
         var exception = await Assert.ThrowsAsync<SqliteException>(
             () => InsertSuscripcionAsync(connection, id: "NO-ES-UN-GUID"));
 
-        Assert.Contains("CHECK", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("GUID", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Suscripcion_RechazaIdentificadorDe36CaracteresQueNoSeaGuid()
+    {
+        await using var connection = await OpenAsync();
+
+        var exception = await Assert.ThrowsAsync<SqliteException>(
+            () => InsertSuscripcionAsync(connection, id: InvalidGuid));
+
+        Assert.Contains("GUID", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Suscripcion_RechazaOperacionIdDe36CaracteresQueNoSeaGuid()
+    {
+        await using var connection = await OpenAsync();
+
+        var exception = await Assert.ThrowsAsync<SqliteException>(
+            () => InsertSuscripcionAsync(
+                connection,
+                id: SuscripcionId,
+                operacionId: InvalidGuid));
+
+        Assert.Contains("GUID", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task GuidValidation_RechazaFormatoInvalidoEnTodasLasColumnasIdentificadoras()
+    {
+        await using var connection = await OpenAsync();
+        await InsertSuscripcionAsync(connection, SuscripcionId);
+        await InsertCobroAsync(connection, CobroId, SuscripcionId);
+        const string gastoId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+        const string plantillaId = "77777777-7777-4777-8777-777777777777";
+        const string ingresoId = "88888888-8888-4888-8888-888888888888";
+        const string operationId = "aaaaaaaa-0000-4000-8000-000000000099";
+        await InsertGastoAsync(connection, gastoId);
+        await InsertPlantillaAsync(connection, plantillaId);
+        await InsertIngresoAsync(connection, ingresoId, plantillaId: plantillaId);
+        await ExecuteAsync(
+            connection,
+            """
+            INSERT INTO saldo_inicial
+                (id, monto_centavos, fecha_inicio, creado_en, actualizado_en)
+            VALUES ('saldo_inicial', 50000, '2026-10-01', $ts, $ts);
+            """,
+            ("$ts", Timestamp));
+
+        var invalidInsertions = new Func<Task>[]
+        {
+            () => ExecuteAsync(connection, $"""
+                INSERT INTO categorias_gasto
+                    (id, nombre, activa, creado_en, actualizado_en)
+                VALUES ('{InvalidGuid}', 'invalid-guid-category', 1, '{Timestamp}', '{Timestamp}');
+                """),
+            () => InsertSuscripcionAsync(
+                connection,
+                InvalidGuid,
+                operacionId: operationId),
+            () => InsertSuscripcionAsync(
+                connection,
+                "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                operacionId: InvalidGuid),
+            () => ExecuteAsync(connection, $"""
+                INSERT INTO suscripcion_versiones
+                    (id, suscripcion_id, numero_version, vigente_desde, monto_centavos,
+                     tipo_importe, frecuencia, dia_ancla, creado_en)
+                VALUES ('{InvalidGuid}', '{SuscripcionId}', 2, '2026-10-02', 1500,
+                        'FIJO', 'MENSUAL', 1, '{Timestamp}');
+                """),
+            () => ExecuteAsync(connection, $"""
+                INSERT INTO suscripcion_versiones
+                    (id, suscripcion_id, numero_version, vigente_desde, monto_centavos,
+                     tipo_importe, frecuencia, dia_ancla, creado_en)
+                VALUES ('dddddddd-dddd-4ddd-8ddd-dddddddddddd', '{InvalidGuid}',
+                        2, '2026-10-02', 1500, 'FIJO', 'MENSUAL', 1, '{Timestamp}');
+                """),
+            () => InsertCobroAsync(connection, InvalidGuid, SuscripcionId, fecha: "2026-12-01"),
+            () => InsertCobroAsync(
+                connection,
+                "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                InvalidGuid,
+                fecha: "2026-12-01"),
+            () => InsertPagoAsync(
+                connection,
+                InvalidGuid,
+                CobroId,
+                "CMP-2026-000099",
+                operationId),
+            () => InsertPagoAsync(
+                connection,
+                "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                InvalidGuid,
+                "CMP-2026-000098",
+                operationId),
+            () => InsertPagoAsync(
+                connection,
+                "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeef",
+                CobroId,
+                "CMP-2026-000097",
+                InvalidGuid),
+            () => InsertGastoAsync(
+                connection,
+                InvalidGuid,
+                operacionId: operationId),
+            () => InsertGastoAsync(
+                connection,
+                "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                categoriaId: InvalidGuid,
+                operacionId: operationId),
+            () => InsertGastoAsync(
+                connection,
+                "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeef",
+                operacionId: InvalidGuid),
+            () => ExecuteAsync(connection, $"""
+                INSERT INTO gastos_historial
+                    (id, gasto_id, concepto_anterior, modificado_en)
+                VALUES ('{InvalidGuid}', '{gastoId}', 'old', '{Timestamp}');
+                """),
+            () => ExecuteAsync(connection, $"""
+                INSERT INTO gastos_historial
+                    (id, gasto_id, concepto_anterior, modificado_en)
+                VALUES ('dddddddd-dddd-4ddd-8ddd-dddddddddddd', '{InvalidGuid}',
+                        'old', '{Timestamp}');
+                """),
+            () => ExecuteAsync(connection, $"""
+                INSERT INTO gastos_historial
+                    (id, gasto_id, categoria_anterior_id, modificado_en)
+                VALUES ('eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeef', '{gastoId}',
+                        '{InvalidGuid}', '{Timestamp}');
+                """),
+            () => ExecuteAsync(connection, $"""
+                INSERT INTO gastos_historial
+                    (id, gasto_id, categoria_nueva_id, modificado_en)
+                VALUES ('ffffffff-ffff-4fff-8fff-ffffffffffff', '{gastoId}',
+                        '{InvalidGuid}', '{Timestamp}');
+                """),
+            () => InsertPlantillaAsync(connection, InvalidGuid, operacionId: operationId),
+            () => InsertPlantillaAsync(
+                connection,
+                "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                operacionId: InvalidGuid),
+            () => InsertIngresoAsync(connection, InvalidGuid, plantillaId: plantillaId),
+            () => InsertIngresoAsync(
+                connection,
+                "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                plantillaId: InvalidGuid),
+            () => ExecuteAsync(connection, $"""
+                INSERT INTO ingresos
+                    (id, concepto, plantilla_id, operacion_id, monto_centavos, tipo,
+                     fecha_prevista, fecha_real, estado, anulado_en, motivo_anulacion,
+                     creado_en, actualizado_en)
+                VALUES ('eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeef', 'Income', '{plantillaId}',
+                        '{InvalidGuid}', 60000, 'MENSUAL', '2026-10-30', NULL,
+                        'PREVISTO', NULL, NULL, '{Timestamp}', '{Timestamp}');
+                """),
+            () => ExecuteAsync(connection, $"""
+                INSERT INTO ingresos_historial
+                    (id, ingreso_id, concepto_anterior, modificado_en)
+                VALUES ('{InvalidGuid}', '{ingresoId}', 'old', '{Timestamp}');
+                """),
+            () => ExecuteAsync(connection, $"""
+                INSERT INTO ingresos_historial
+                    (id, ingreso_id, concepto_anterior, modificado_en)
+                VALUES ('dddddddd-dddd-4ddd-8ddd-dddddddddddd', '{InvalidGuid}',
+                        'old', '{Timestamp}');
+                """),
+            () => ExecuteAsync(connection, $"""
+                INSERT INTO saldo_inicial_historial
+                    (id, saldo_inicial_id, monto_anterior, monto_nuevo,
+                     fecha_inicio_anterior, fecha_inicio_nueva, modificado_en)
+                VALUES ('{InvalidGuid}', 'saldo_inicial', 50000, 60000,
+                        '2026-10-01', '2026-10-02', '{Timestamp}');
+                """)
+        };
+
+        foreach (var insertion in invalidInsertions)
+        {
+            await AssertGuidRejectedAsync(insertion);
+        }
+    }
+
+    [Fact]
+    public async Task GuidValidation_AceptaGuidValidosYRechazaCambiosInvalidos()
+    {
+        await using var connection = await OpenAsync();
+        await InsertSuscripcionAsync(connection, SuscripcionId);
+        await InsertCobroAsync(connection, CobroId, SuscripcionId);
+        const string gastoId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+        await InsertGastoAsync(connection, gastoId);
+
+        await ExecuteAsync(
+            connection,
+            """
+            INSERT INTO gastos_historial
+                (id, gasto_id, categoria_anterior_id, categoria_nueva_id, modificado_en)
+            VALUES
+                ('dddddddd-dddd-4ddd-8ddd-dddddddddddd', $gastoId,
+                 '11111111-1111-4111-8111-111111111111',
+                 '22222222-2222-4222-8222-222222222222', $ts);
+            """,
+            ("$gastoId", gastoId),
+            ("$ts", Timestamp));
+
+        await AssertGuidRejectedAsync(
+            () => ExecuteAsync(
+                connection,
+                "UPDATE gastos SET operacion_id = $id WHERE id = $gastoId;",
+                ("$id", InvalidGuid),
+                ("$gastoId", gastoId)));
+        await AssertGuidRejectedAsync(
+            () => ExecuteAsync(
+                connection,
+                "UPDATE gastos_historial SET categoria_nueva_id = $id WHERE gasto_id = $gastoId;",
+                ("$id", InvalidGuid),
+                ("$gastoId", gastoId)));
     }
 
     [Fact]
@@ -252,6 +470,71 @@ public sealed class DomainSchemaTests : IAsyncLifetime
         Assert.Equal(1L, Convert.ToInt64(await command.ExecuteScalarAsync()));
     }
 
+    [Fact]
+    public async Task Pago_ActualizaImporteYCobroCuandoCoinciden()
+    {
+        await using var connection = await OpenAsync();
+        await InsertSuscripcionAsync(connection, SuscripcionId);
+        await InsertCobroAsync(connection, CobroId, SuscripcionId, fecha: "2026-10-28", monto: 1500);
+        const string segundoCobroId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+        await InsertCobroAsync(connection, segundoCobroId, SuscripcionId, fecha: "2026-11-28", monto: 2000);
+        const string pagoId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+        await InsertPagoAsync(
+            connection,
+            pagoId,
+            CobroId,
+            numeroComprobante: "CMP-2026-000001",
+            operacionId: "aaaaaaaa-0000-4000-8000-000000000001",
+            monto: 1500);
+
+        await ExecuteAsync(
+            connection,
+            "UPDATE pagos SET cobro_id = $cobroId, monto_centavos = 2000 WHERE id = $pagoId;",
+            ("$cobroId", segundoCobroId),
+            ("$pagoId", pagoId));
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT cobro_id, monto_centavos FROM pagos WHERE id = $id;";
+        command.Parameters.AddWithValue("$id", pagoId);
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(segundoCobroId, reader.GetString(0));
+        Assert.Equal(2000, reader.GetInt64(1));
+    }
+
+    [Fact]
+    public async Task Pago_RechazaActualizacionesDeImporteOCobroQueNoCoinciden()
+    {
+        await using var connection = await OpenAsync();
+        await InsertSuscripcionAsync(connection, SuscripcionId);
+        await InsertCobroAsync(connection, CobroId, SuscripcionId, fecha: "2026-10-28", monto: 1500);
+        const string segundoCobroId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+        await InsertCobroAsync(connection, segundoCobroId, SuscripcionId, fecha: "2026-11-28", monto: 2000);
+        const string pagoId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+        await InsertPagoAsync(
+            connection,
+            pagoId,
+            CobroId,
+            numeroComprobante: "CMP-2026-000001",
+            operacionId: "aaaaaaaa-0000-4000-8000-000000000001",
+            monto: 1500);
+
+        var amountException = await Assert.ThrowsAsync<SqliteException>(
+            () => ExecuteAsync(
+                connection,
+                "UPDATE pagos SET monto_centavos = 1000 WHERE id = $id;",
+                ("$id", pagoId)));
+        Assert.Contains("importe del pago", amountException.Message, StringComparison.OrdinalIgnoreCase);
+
+        var chargeException = await Assert.ThrowsAsync<SqliteException>(
+            () => ExecuteAsync(
+                connection,
+                "UPDATE pagos SET cobro_id = $cobroId WHERE id = $id;",
+                ("$cobroId", segundoCobroId),
+                ("$id", pagoId)));
+        Assert.Contains("importe del pago", chargeException.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     // -------------------------------------------------------------------------
     // F0-27 — Idempotencia en el alta de configuración
     // -------------------------------------------------------------------------
@@ -264,13 +547,13 @@ public sealed class DomainSchemaTests : IAsyncLifetime
         await InsertSuscripcionAsync(
             connection,
             SuscripcionId,
-            operacionId: "op-suscripcion");
+            operacionId: "aaaaaaaa-0000-4000-8000-000000000001");
 
         var exception = await Assert.ThrowsAsync<SqliteException>(
             () => InsertSuscripcionAsync(
                 connection,
                 "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
-                operacionId: "op-suscripcion"));
+                operacionId: "aaaaaaaa-0000-4000-8000-000000000001"));
 
         Assert.Contains("UNIQUE", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
@@ -323,7 +606,7 @@ public sealed class DomainSchemaTests : IAsyncLifetime
             "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
             CobroId,
             numeroComprobante: "CMP-2026-000001",
-            operacionId: "op-1");
+            operacionId: "aaaaaaaa-0000-4000-8000-000000000001");
 
         var exception = await Assert.ThrowsAsync<SqliteException>(
             () => InsertPagoAsync(
@@ -331,7 +614,7 @@ public sealed class DomainSchemaTests : IAsyncLifetime
                 "ffffffff-ffff-4fff-8fff-ffffffffffff",
                 CobroId,
                 numeroComprobante: "CMP-2026-000002",
-                operacionId: "op-2"));
+                operacionId: "aaaaaaaa-0000-4000-8000-000000000002"));
 
         Assert.Contains("UNIQUE", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
@@ -350,7 +633,7 @@ public sealed class DomainSchemaTests : IAsyncLifetime
             primerPagoId,
             CobroId,
             numeroComprobante: "CMP-2026-000001",
-            operacionId: "op-1");
+            operacionId: "aaaaaaaa-0000-4000-8000-000000000001");
 
         await ExecuteAsync(
             connection,
@@ -371,13 +654,84 @@ public sealed class DomainSchemaTests : IAsyncLifetime
             "ffffffff-ffff-4fff-8fff-ffffffffffff",
             CobroId,
             numeroComprobante: "CMP-2026-000002",
-            operacionId: "op-2");
+            operacionId: "aaaaaaaa-0000-4000-8000-000000000002");
 
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT COUNT(*) FROM pagos WHERE cobro_id = $cobroId AND estado = 'VIGENTE';";
         command.Parameters.AddWithValue("$cobroId", CobroId);
 
         Assert.Equal(1L, Convert.ToInt64(await command.ExecuteScalarAsync()));
+    }
+
+    [Fact]
+    public async Task Pago_PermiteReactivarPagoAnuladoConImporteCorrecto()
+    {
+        await using var connection = await OpenAsync();
+        await InsertSuscripcionAsync(connection, SuscripcionId);
+        await InsertCobroAsync(connection, CobroId, SuscripcionId, monto: 1500);
+
+        const string pagoId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+        await InsertPagoAsync(
+            connection,
+            pagoId,
+            CobroId,
+            numeroComprobante: "CMP-2026-000001",
+            operacionId: "aaaaaaaa-0000-4000-8000-000000000001",
+            monto: 1500,
+            estado: "ANULADO",
+            anuladoEn: Timestamp,
+            motivoAnulacion: "Registro incorrecto");
+
+        await ExecuteAsync(
+            connection,
+            """
+            UPDATE pagos
+               SET estado = 'VIGENTE',
+                   anulado_en = NULL,
+                   motivo_anulacion = NULL
+             WHERE id = $id;
+            """,
+            ("$id", pagoId));
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT estado FROM pagos WHERE id = $id;";
+        command.Parameters.AddWithValue("$id", pagoId);
+
+        Assert.Equal("VIGENTE", (string?)await command.ExecuteScalarAsync());
+    }
+
+    [Fact]
+    public async Task Pago_RechazaReactivarPagoAnuladoConImporteIncorrecto()
+    {
+        await using var connection = await OpenAsync();
+        await InsertSuscripcionAsync(connection, SuscripcionId);
+        await InsertCobroAsync(connection, CobroId, SuscripcionId, monto: 1500);
+
+        const string pagoId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+        await InsertPagoAsync(
+            connection,
+            pagoId,
+            CobroId,
+            numeroComprobante: "CMP-2026-000001",
+            operacionId: "aaaaaaaa-0000-4000-8000-000000000001",
+            monto: 1000,
+            estado: "ANULADO",
+            anuladoEn: Timestamp,
+            motivoAnulacion: "Registro incorrecto");
+
+        var exception = await Assert.ThrowsAsync<SqliteException>(
+            () => ExecuteAsync(
+                connection,
+                """
+                UPDATE pagos
+                   SET estado = 'VIGENTE',
+                       anulado_en = NULL,
+                       motivo_anulacion = NULL
+                 WHERE id = $id;
+                """,
+                ("$id", pagoId)));
+
+        Assert.Contains("importe del pago", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     // -------------------------------------------------------------------------
@@ -397,7 +751,7 @@ public sealed class DomainSchemaTests : IAsyncLifetime
                 "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
                 CobroId,
                 numeroComprobante: "CMP-2026-000001",
-                operacionId: "op-1",
+                operacionId: "aaaaaaaa-0000-4000-8000-000000000001",
                 monto: 1000));
 
         Assert.Contains("importe del pago", exception.Message, StringComparison.OrdinalIgnoreCase);
@@ -415,7 +769,7 @@ public sealed class DomainSchemaTests : IAsyncLifetime
             "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
             CobroId,
             numeroComprobante: "CMP-2026-000001",
-            operacionId: "op-1",
+            operacionId: "aaaaaaaa-0000-4000-8000-000000000001",
             monto: 1500);
 
         await using var command = connection.CreateCommand();
@@ -445,7 +799,7 @@ public sealed class DomainSchemaTests : IAsyncLifetime
             "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
             CobroId,
             numeroComprobante: "CMP-2026-000001",
-            operacionId: "op-1");
+            operacionId: "aaaaaaaa-0000-4000-8000-000000000001");
 
         var exception = await Assert.ThrowsAsync<SqliteException>(
             () => InsertPagoAsync(
@@ -453,7 +807,7 @@ public sealed class DomainSchemaTests : IAsyncLifetime
                 "ffffffff-ffff-4fff-8fff-ffffffffffff",
                 "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
                 numeroComprobante: "CMP-2026-000001",
-                operacionId: "op-2"));
+                operacionId: "aaaaaaaa-0000-4000-8000-000000000002"));
 
         Assert.Contains("UNIQUE", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
@@ -471,7 +825,7 @@ public sealed class DomainSchemaTests : IAsyncLifetime
                 "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
                 CobroId,
                 numeroComprobante: "CMP-26-1",
-                operacionId: "op-1"));
+                operacionId: "aaaaaaaa-0000-4000-8000-000000000001"));
     }
 
     // -------------------------------------------------------------------------
@@ -491,7 +845,7 @@ public sealed class DomainSchemaTests : IAsyncLifetime
                 "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
                 CobroId,
                 numeroComprobante: "CMP-2026-000001",
-                operacionId: "op-1",
+                operacionId: "aaaaaaaa-0000-4000-8000-000000000001",
                 estado: "ANULADO",
                 anuladoEn: Timestamp,
                 motivoAnulacion: null));
@@ -518,7 +872,7 @@ public sealed class DomainSchemaTests : IAsyncLifetime
             "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
             CobroId,
             numeroComprobante: "CMP-2026-000001",
-            operacionId: "op-repetida");
+            operacionId: "aaaaaaaa-0000-4000-8000-000000000003");
 
         var exception = await Assert.ThrowsAsync<SqliteException>(
             () => InsertPagoAsync(
@@ -526,7 +880,7 @@ public sealed class DomainSchemaTests : IAsyncLifetime
                 "ffffffff-ffff-4fff-8fff-ffffffffffff",
                 "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
                 numeroComprobante: "CMP-2026-000002",
-                operacionId: "op-repetida"));
+                operacionId: "aaaaaaaa-0000-4000-8000-000000000003"));
 
         Assert.Contains("UNIQUE", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
@@ -569,14 +923,14 @@ public sealed class DomainSchemaTests : IAsyncLifetime
         await InsertGastoAsync(
             connection,
             "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-            operacionId: "gasto-op-1",
+            operacionId: "bbbbbbbb-0000-4000-8000-000000000001",
             estado: "PLANIFICADO",
             fechaReal: null);
 
         await InsertGastoAsync(
             connection,
             "cccccccc-cccc-4ccc-8ccc-cccccccccccd",
-            operacionId: "gasto-op-2",
+            operacionId: "bbbbbbbb-0000-4000-8000-000000000002",
             estado: "CONFIRMADO",
             fechaReal: "2026-10-28");
 
@@ -641,13 +995,13 @@ public sealed class DomainSchemaTests : IAsyncLifetime
         await InsertPlantillaAsync(
             connection,
             "77777777-7777-4777-8777-777777777777",
-            operacionId: "op-plantilla");
+            operacionId: "cccccccc-0000-4000-8000-000000000001");
 
         var exception = await Assert.ThrowsAsync<SqliteException>(
             () => InsertPlantillaAsync(
                 connection,
                 "99999999-9999-4999-8999-999999999998",
-                operacionId: "op-plantilla"));
+                operacionId: "cccccccc-0000-4000-8000-000000000001"));
 
         Assert.Contains("UNIQUE", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
@@ -698,6 +1052,12 @@ public sealed class DomainSchemaTests : IAsyncLifetime
     // Utilidades
     // -------------------------------------------------------------------------
 
+    private static async Task AssertGuidRejectedAsync(Func<Task> operation)
+    {
+        var exception = await Assert.ThrowsAsync<SqliteException>(operation);
+        Assert.Contains("GUID", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     private async Task<SqliteConnection> OpenAsync()
     {
         var factory = new SqliteConnectionFactory(_options);
@@ -740,7 +1100,7 @@ public sealed class DomainSchemaTests : IAsyncLifetime
                  '2026-10-28', $proximo, $activa, $desactivadaEn, $ts, $ts);
             """,
             ("$id", id),
-            ("$operacionId", operacionId ?? $"op-{id}"),
+            ("$operacionId", operacionId ?? id),
             ("$monto", monto),
             ("$proximo", proximo),
             ("$activa", activa),
@@ -810,7 +1170,7 @@ public sealed class DomainSchemaTests : IAsyncLifetime
         SqliteConnection connection,
         string id,
         string categoriaId = CategoriaId,
-        string operacionId = "gasto-op",
+        string? operacionId = null,
         string estado = "CONFIRMADO",
         string? fechaReal = "2026-10-28",
         string fechaPrevista = "2026-10-28",
@@ -829,7 +1189,7 @@ public sealed class DomainSchemaTests : IAsyncLifetime
             """,
             ("$id", id),
             ("$categoriaId", categoriaId),
-            ("$operacionId", operacionId),
+            ("$operacionId", operacionId ?? id),
             ("$monto", monto),
             ("$fechaPrevista", fechaPrevista),
             ("$fechaReal", fechaReal),
@@ -855,7 +1215,7 @@ public sealed class DomainSchemaTests : IAsyncLifetime
                  '2026-10-01', 1, $ts, $ts);
             """,
             ("$id", id),
-            ("$operacionId", operacionId ?? $"op-{id}"),
+            ("$operacionId", operacionId ?? id),
             ("$frecuencia", frecuencia),
             ("$diaAncla", diaAncla),
             ("$ts", Timestamp));
@@ -882,7 +1242,7 @@ public sealed class DomainSchemaTests : IAsyncLifetime
             """,
             ("$id", id),
             ("$plantillaId", plantillaId),
-            ("$operacionId", $"op-{id}"),
+            ("$operacionId", id),
             ("$tipo", tipo),
             ("$fechaReal", fechaReal),
             ("$estado", estado),

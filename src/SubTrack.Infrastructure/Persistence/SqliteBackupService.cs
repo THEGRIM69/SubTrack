@@ -16,10 +16,19 @@ public sealed class SqliteBackupService
     private readonly SubTrackDatabaseOptions _databaseOptions;
     private readonly SubTrackBackupOptions _backupOptions;
     private readonly SqliteConnectionFactory _connectionFactory;
+    private readonly Action<SqliteBackupFaultPoint, string>? _faultInjector;
 
     public SqliteBackupService(
         SubTrackDatabaseOptions databaseOptions,
         SubTrackBackupOptions? backupOptions = null)
+        : this(databaseOptions, backupOptions, null)
+    {
+    }
+
+    internal SqliteBackupService(
+        SubTrackDatabaseOptions databaseOptions,
+        SubTrackBackupOptions? backupOptions,
+        Action<SqliteBackupFaultPoint, string>? faultInjector)
     {
         ArgumentNullException.ThrowIfNull(databaseOptions);
 
@@ -27,6 +36,7 @@ public sealed class SqliteBackupService
         _backupOptions = (backupOptions ?? SubTrackBackupOptions.CreateDefault(_databaseOptions))
             .Normalize(_databaseOptions);
         _connectionFactory = new SqliteConnectionFactory(_databaseOptions);
+        _faultInjector = faultInjector;
     }
 
     /// <summary>
@@ -89,13 +99,15 @@ public sealed class SqliteBackupService
                     tempTargetPath);
             }
 
-            // Si el destino ya existía, eliminarlo para mover el staging
+            // Reemplazar en el mismo volumen para conservar el destino hasta que el staging esté listo.
             if (File.Exists(targetPath))
             {
-                File.Delete(targetPath);
+                File.Replace(tempTargetPath, targetPath, destinationBackupFileName: null);
             }
-
-            File.Move(tempTargetPath, targetPath);
+            else
+            {
+                File.Move(tempTargetPath, targetPath);
+            }
 
             var fileInfo = new FileInfo(targetPath);
 
@@ -195,63 +207,55 @@ public sealed class SqliteBackupService
 
         var timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff", CultureInfo.InvariantCulture);
         var safetyBackupPath = activeDbPath + $".pre_restore_{timestamp}.bak";
-        var safetyWalPath = safetyBackupPath + "-wal";
-        var safetyShmPath = safetyBackupPath + "-shm";
+        var stagingRestorePath = activeDbPath + $".restoring_{Guid.NewGuid():N}.tmp";
+        var safetySnapshotValidated = false;
 
         var stopwatch = Stopwatch.StartNew();
 
-        // 2. Cerrar y liberar todos los pools de conexión de SQLite para consolidar transacciones y permitir reemplazo
+        // 2. Cerrar y liberar los pools antes de crear una copia consistente de seguridad.
         SqliteConnection.ClearAllPools();
 
         var hadActiveDb = File.Exists(activeDbPath);
-        var hadActiveWal = File.Exists(activeWalPath);
-        var hadActiveShm = File.Exists(activeShmPath);
 
         try
         {
-            // 3. Crear copia de seguridad preventiva de la base activa actual si existe
+            // 3. Crear una copia preventiva consistente, incluyendo cambios que sigan en el WAL.
             if (hadActiveDb)
             {
-                File.Copy(activeDbPath, safetyBackupPath, overwrite: true);
-
-                if (File.Exists(activeWalPath))
-                {
-                    File.Copy(activeWalPath, safetyWalPath, overwrite: true);
-                }
-
-                if (File.Exists(activeShmPath))
-                {
-                    File.Copy(activeShmPath, safetyShmPath, overwrite: true);
-                }
+                await CreateSafetySnapshotAsync(safetyBackupPath, cancellationToken)
+                    .ConfigureAwait(false);
+                safetySnapshotValidated = true;
             }
 
-            // 4. Copiar el respaldo en un archivo temporal adyacente a la base activa
-            var stagingRestorePath = activeDbPath + $".restoring_{Guid.NewGuid():N}.tmp";
+            // 4. Preparar el archivo a restaurar junto a la base activa, en el mismo volumen.
             File.Copy(fullSourcePath, stagingRestorePath, overwrite: true);
 
-            // 5. Eliminar logs WAL/SHM antiguos para que la nueva base limpia no herede transacciones obsoletas
-            TryDeleteFile(activeWalPath);
-            TryDeleteFile(activeShmPath);
-
-            // 6. Reemplazar la base activa con el archivo restaurado
-            if (File.Exists(activeDbPath))
+            // Un WAL pendiente debe consolidarse antes de retirar los sidecars de la base anterior.
+            if (hadActiveDb)
             {
-                File.Delete(activeDbPath);
+                await CheckpointActiveWalAsync(cancellationToken).ConfigureAwait(false);
             }
-            File.Move(stagingRestorePath, activeDbPath);
 
-            // 7. Re-inicializar parámetros de la base restaurada (WAL, sincronismo, etc.) y verificar conexión
+            SqliteConnection.ClearAllPools();
+            DeleteFileIfExists(activeWalPath);
+            DeleteFileIfExists(activeShmPath);
+
+            // 5. Reemplazar atómicamente la base activa para que una interrupción no deje un hueco.
+            ReplaceFile(stagingRestorePath, activeDbPath);
+            _faultInjector?.Invoke(
+                SqliteBackupFaultPoint.AfterRestoredDatabaseReplacement,
+                activeDbPath);
+
+            // 6. Re-inicializar parámetros de la base restaurada y verificar conexión.
             var initializer = new SqliteDatabaseInitializer(_databaseOptions);
             await initializer.InitializeAsync(cancellationToken).ConfigureAwait(false);
 
             stopwatch.Stop();
 
-            // 8. Si no se solicitó conservar la copia de seguridad preventiva, limpiarla
+            // 7. Si no se solicitó conservar la copia preventiva, limpiarla.
             if (!keepSafetyBackup && hadActiveDb)
             {
                 TryDeleteFile(safetyBackupPath);
-                TryDeleteFile(safetyWalPath);
-                TryDeleteFile(safetyShmPath);
             }
 
             return new RestoreResult(
@@ -265,24 +269,39 @@ public sealed class SqliteBackupService
         }
         catch (Exception ex)
         {
-            // Reversión automática de emergencia: restaurar los archivos previos si existían
+            // Reversión automática: restaurar la copia preventiva como un archivo SQLite completo.
             SqliteConnection.ClearAllPools();
 
-            if (hadActiveDb && File.Exists(safetyBackupPath))
+            if (safetySnapshotValidated)
             {
+                var recoveryStagingPath = activeDbPath + $".recovering_{Guid.NewGuid():N}.tmp";
+
                 try
                 {
-                    File.Copy(safetyBackupPath, activeDbPath, overwrite: true);
+                    var safetyVerification = await VerifyBackupInternalAsync(
+                        safetyBackupPath,
+                        CancellationToken.None).ConfigureAwait(false);
 
-                    if (hadActiveWal && File.Exists(safetyWalPath))
+                    if (!safetyVerification.IsValid)
                     {
-                        File.Copy(safetyWalPath, activeWalPath, overwrite: true);
+                        throw new SubTrackPersistenceException(
+                            $"La copia preventiva validada dejó de ser válida: {safetyVerification.FailureReason}",
+                            PersistenceFailureKind.RestoreFailed,
+                            safetyBackupPath);
                     }
 
-                    if (hadActiveShm && File.Exists(safetyShmPath))
-                    {
-                        File.Copy(safetyShmPath, activeShmPath, overwrite: true);
-                    }
+                    File.Copy(safetyBackupPath, recoveryStagingPath, overwrite: false);
+                    DeleteFileIfExists(activeWalPath);
+                    DeleteFileIfExists(activeShmPath);
+                    ReplaceFile(recoveryStagingPath, activeDbPath);
+
+                    _faultInjector?.Invoke(
+                        SqliteBackupFaultPoint.BeforeRecoveryDatabaseInitialization,
+                        activeDbPath);
+
+                    await new SqliteDatabaseInitializer(_databaseOptions)
+                        .InitializeAsync(CancellationToken.None)
+                        .ConfigureAwait(false);
                 }
                 catch (Exception rollbackEx)
                 {
@@ -294,6 +313,16 @@ public sealed class SqliteBackupService
                         null,
                         ex);
                 }
+                finally
+                {
+                    TryDeleteFile(recoveryStagingPath);
+                }
+            }
+            else if (!hadActiveDb)
+            {
+                DeleteFileIfExists(activeWalPath);
+                DeleteFileIfExists(activeShmPath);
+                TryDeleteFile(activeDbPath);
             }
 
             if (ex is SubTrackPersistenceException)
@@ -307,6 +336,10 @@ public sealed class SqliteBackupService
                 activeDbPath,
                 null,
                 ex);
+        }
+        finally
+        {
+            TryDeleteFile(stagingRestorePath);
         }
     }
 
@@ -324,6 +357,11 @@ public sealed class SqliteBackupService
         var directoryInfo = new DirectoryInfo(backupDir);
         var files = directoryInfo
             .GetFiles("*.db", SearchOption.TopDirectoryOnly)
+            .Where(file => IsManagedBackupFile(file.Name, _backupOptions.BackupFilePrefix))
+            .Where(file => !string.Equals(
+                Path.GetFullPath(file.FullName),
+                _databaseOptions.DatabasePath,
+                StringComparison.OrdinalIgnoreCase))
             .OrderByDescending(f => f.CreationTimeUtc)
             .Select(f => new BackupInfo(
                 FilePath: f.FullName,
@@ -333,6 +371,27 @@ public sealed class SqliteBackupService
             .ToList();
 
         return Task.FromResult<IReadOnlyList<BackupInfo>>(files);
+    }
+
+    private static bool IsManagedBackupFile(string fileName, string backupFilePrefix)
+    {
+        var extension = Path.GetExtension(fileName);
+        var prefixAndSeparator = backupFilePrefix + "_";
+        if (!string.Equals(extension, ".db", StringComparison.OrdinalIgnoreCase)
+            || !fileName.StartsWith(prefixAndSeparator, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var timestamp = fileName.Substring(
+            prefixAndSeparator.Length,
+            fileName.Length - prefixAndSeparator.Length - extension.Length);
+        return DateTime.TryParseExact(
+            timestamp,
+            "yyyyMMdd_HHmmss_fff",
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.None,
+            out _);
     }
 
     /// <summary>
@@ -367,9 +426,21 @@ public sealed class SqliteBackupService
                     deletedCount++;
                 }
             }
-            catch
+            catch (UnauthorizedAccessException exception)
             {
-                // Ignorar archivos en uso durante la poda
+                throw new SubTrackPersistenceException(
+                    $"No hay permisos para eliminar el respaldo '{backup.FilePath}'.",
+                    PersistenceFailureKind.IoError,
+                    backup.FilePath,
+                    innerException: exception);
+            }
+            catch (IOException exception)
+            {
+                throw new SubTrackPersistenceException(
+                    $"No se pudo eliminar el respaldo '{backup.FilePath}'.",
+                    PersistenceFailureKind.IoError,
+                    backup.FilePath,
+                    innerException: exception);
             }
         }
 
@@ -457,13 +528,41 @@ public sealed class SqliteBackupService
                     MigrationsCount: 0);
             }
 
-            // 3. Consultar user_version
+            // 3. Verificar integridad referencial
+            await using var foreignKeyCheckCmd = connection.CreateCommand();
+            foreignKeyCheckCmd.CommandText = "PRAGMA foreign_key_check;";
+            await using var foreignKeyReader = await foreignKeyCheckCmd
+                .ExecuteReaderAsync(cancellationToken)
+                .ConfigureAwait(false);
+
+            if (await foreignKeyReader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var tableName = foreignKeyReader.GetString(0);
+                var rowId = foreignKeyReader.IsDBNull(1)
+                    ? "NULL"
+                    : foreignKeyReader.GetValue(1).ToString();
+                var parentTable = foreignKeyReader.GetString(2);
+                var foreignKeyId = foreignKeyReader.GetInt64(3);
+
+                return new BackupVerificationResult(
+                    IsValid: false,
+                    BackupPath: fullPath,
+                    FileSizeBytes: fileInfo.Length,
+                    ApplicationId: appId,
+                    UserVersion: 0,
+                    IntegrityStatus: "foreign_key_violation",
+                    FailureReason:
+                        $"La comprobación de claves foráneas encontró una referencia inválida en '{tableName}' (rowid={rowId}, tabla relacionada='{parentTable}', id={foreignKeyId}).",
+                    MigrationsCount: 0);
+            }
+
+            // 4. Consultar user_version
             await using var userVerCmd = connection.CreateCommand();
             userVerCmd.CommandText = "PRAGMA user_version;";
             var userVerScalar = await userVerCmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
             var userVersion = Convert.ToInt32(userVerScalar, CultureInfo.InvariantCulture);
 
-            // 4. Consultar cantidad de migraciones registradas si existe la tabla
+            // 5. Consultar cantidad de migraciones registradas si existe la tabla
             var migrationsCount = 0;
             await using var countCmd = connection.CreateCommand();
             countCmd.CommandText = @"
@@ -524,6 +623,119 @@ public sealed class SqliteBackupService
         }
     }
 
+    private async Task CreateSafetySnapshotAsync(
+        string destinationPath,
+        CancellationToken cancellationToken)
+    {
+        var stagingPath = destinationPath + $".staging_{Guid.NewGuid():N}.tmp";
+
+        try
+        {
+            _faultInjector?.Invoke(
+                SqliteBackupFaultPoint.BeforeSafetySnapshotCreation,
+                stagingPath);
+
+            await using (var connection = await _connectionFactory
+                             .OpenAsync(cancellationToken)
+                             .ConfigureAwait(false))
+            {
+                var escapedPath = stagingPath.Replace("'", "''");
+
+                await using var command = connection.CreateCommand();
+                command.CommandText = $"VACUUM INTO '{escapedPath}';";
+                command.CommandTimeout = Math.Max(60, _databaseOptions.BusyTimeoutMilliseconds / 1000);
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            _faultInjector?.Invoke(
+                SqliteBackupFaultPoint.AfterSafetySnapshotCreation,
+                stagingPath);
+
+            if (!File.Exists(stagingPath) || new FileInfo(stagingPath).Length == 0)
+            {
+                throw new SubTrackPersistenceException(
+                    "La copia preventiva temporal no existe o está vacía.",
+                    PersistenceFailureKind.RestoreFailed,
+                    stagingPath);
+            }
+
+            _faultInjector?.Invoke(
+                SqliteBackupFaultPoint.BeforeSafetySnapshotValidation,
+                stagingPath);
+
+            var verification = await VerifyBackupInternalAsync(stagingPath, cancellationToken)
+                .ConfigureAwait(false);
+            if (!verification.IsValid)
+            {
+                throw new SubTrackPersistenceException(
+                    $"La copia preventiva no superó la verificación de integridad: {verification.FailureReason}",
+                    PersistenceFailureKind.RestoreFailed,
+                    stagingPath);
+            }
+
+            File.Move(stagingPath, destinationPath);
+        }
+        finally
+        {
+            TryDeleteFile(stagingPath);
+        }
+    }
+
+    private async Task CheckpointActiveWalAsync(CancellationToken cancellationToken)
+    {
+        await using var connection = await _connectionFactory
+            .OpenAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        await using (var journalCommand = connection.CreateCommand())
+        {
+            journalCommand.CommandText = "PRAGMA journal_mode;";
+            var journalMode = (await journalCommand.ExecuteScalarAsync(cancellationToken)
+                .ConfigureAwait(false))?.ToString();
+
+            if (!string.Equals(journalMode, "wal", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+        }
+
+        await using var checkpointCommand = connection.CreateCommand();
+        checkpointCommand.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+
+        await using var reader = await checkpointCommand
+            .ExecuteReaderAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
+            || reader.GetInt32(0) != 0)
+        {
+            throw new SubTrackPersistenceException(
+                "No se pudo consolidar el WAL antes de restaurar; hay operaciones activas en la base.",
+                PersistenceFailureKind.Busy,
+                _databaseOptions.DatabasePath);
+        }
+    }
+
+    private static void ReplaceFile(string sourcePath, string destinationPath)
+    {
+        if (File.Exists(destinationPath))
+        {
+            File.Replace(sourcePath, destinationPath, destinationBackupFileName: null);
+        }
+        else
+        {
+            File.Move(sourcePath, destinationPath);
+        }
+    }
+
+    private static void DeleteFileIfExists(string path)
+    {
+        if (File.Exists(path))
+        {
+            File.Delete(path);
+        }
+    }
+
     private static void TryDeleteFile(string path)
     {
         try
@@ -533,9 +745,19 @@ public sealed class SqliteBackupService
                 File.Delete(path);
             }
         }
+
         catch
         {
             // Limpieza pasiva de archivos temporales
         }
     }
+}
+
+internal enum SqliteBackupFaultPoint
+{
+    BeforeSafetySnapshotCreation,
+    AfterSafetySnapshotCreation,
+    BeforeSafetySnapshotValidation,
+    AfterRestoredDatabaseReplacement,
+    BeforeRecoveryDatabaseInitialization
 }

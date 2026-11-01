@@ -398,6 +398,25 @@ public sealed class SqliteDatabaseMigrator
 
         if (currentAppId == 0)
         {
+            await using var objectsCommand = connection.CreateCommand();
+            objectsCommand.CommandText = """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM sqlite_master
+                    WHERE type IN ('table', 'view')
+                      AND lower(substr(name, 1, 7)) <> 'sqlite_');
+                """;
+            var hasApplicationObjects = Convert.ToInt64(
+                await objectsCommand.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+                CultureInfo.InvariantCulture);
+
+            if (hasApplicationObjects != 0)
+            {
+                throw new SubTrackPersistenceException(
+                    "El archivo SQLite contiene objetos de otra aplicación y no tiene identidad de SubTrack.",
+                    PersistenceFailureKind.ForeignDatabase);
+            }
+
             await using var setCmd = connection.CreateCommand();
             setCmd.CommandText = $"PRAGMA application_id = {ApplicationId};";
             await setCmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
