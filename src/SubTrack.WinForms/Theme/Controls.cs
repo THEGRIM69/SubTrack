@@ -558,6 +558,8 @@ internal sealed class BarsChart : Control
     public sealed record Bar(string Label, long IncomeCents, long ExpenseCents);
 
     private IReadOnlyList<Bar> _bars = Array.Empty<Bar>();
+    private readonly ToolTip _barToolTip = new();
+    private string? _visibleBarToolTip;
 
     public BarsChart()
     {
@@ -574,7 +576,93 @@ internal sealed class BarsChart : Control
     public void SetData(IReadOnlyList<Bar> bars)
     {
         _bars = bars;
+        _barToolTip.Hide(this);
+        _visibleBarToolTip = null;
         Invalidate();
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+
+        var toolTipText = GetBarToolTip(e.Location);
+        if (toolTipText == _visibleBarToolTip)
+        {
+            return;
+        }
+
+        _barToolTip.Hide(this);
+        _visibleBarToolTip = toolTipText;
+        if (toolTipText is not null)
+        {
+            _barToolTip.Show(toolTipText, this, e.X + 12, e.Y + 12, 10000);
+        }
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        _barToolTip.Hide(this);
+        _visibleBarToolTip = null;
+        base.OnMouseLeave(e);
+    }
+
+    private string? GetBarToolTip(Point location)
+    {
+        var area = new Rectangle(8, 34, Width - 16, Height - 34 - 26);
+        if (_bars.Count == 0 || area.Width <= 20 || area.Height <= 20)
+        {
+            return null;
+        }
+
+        var maximum = _bars.Max(bar => Math.Max(bar.IncomeCents, bar.ExpenseCents));
+        if (maximum <= 0)
+        {
+            maximum = 1;
+        }
+
+        var slot = area.Width / (float)_bars.Count;
+        var barWidth = Math.Min(18f, slot / 3.4f);
+
+        for (var index = 0; index < _bars.Count; index++)
+        {
+            var bar = _bars[index];
+            var center = area.Left + (slot * index) + (slot / 2f);
+            var incomeHeight = (float)(area.Height * (bar.IncomeCents / (double)maximum));
+            var expenseHeight = (float)(area.Height * (bar.ExpenseCents / (double)maximum));
+
+            var incomeBounds = GetBarBounds(center - barWidth - 2, area.Bottom, barWidth, incomeHeight);
+            if (incomeBounds.Contains(location))
+            {
+                return $"Ingresos · {bar.Label}{Environment.NewLine}{FormatTooltipAmount(bar.IncomeCents)}";
+            }
+
+            var expenseBounds = GetBarBounds(center + 2, area.Bottom, barWidth, expenseHeight);
+            if (expenseBounds.Contains(location))
+            {
+                return $"Egresos · {bar.Label}{Environment.NewLine}{FormatTooltipAmount(bar.ExpenseCents)}";
+            }
+        }
+
+        return null;
+    }
+
+    private static Rectangle GetBarBounds(float x, float bottom, float width, float height)
+    {
+        var displayHeight = Math.Max(height, 6f);
+        return Rectangle.Round(new RectangleF(x, bottom - displayHeight, width, displayHeight));
+    }
+
+    private static string FormatTooltipAmount(long cents) =>
+        (cents / 100m).ToString("$0.00", CultureInfo.InvariantCulture);
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _barToolTip.Dispose();
+        }
+
+        base.Dispose(disposing);
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -620,8 +708,8 @@ internal sealed class BarsChart : Control
             var incomeHeight = (float)(area.Height * (bar.IncomeCents / (double)maximum));
             var expenseHeight = (float)(area.Height * (bar.ExpenseCents / (double)maximum));
 
-            DrawBar(graphics, center - barWidth - 2, area.Bottom, barWidth, incomeHeight, Palette.Primary);
-            DrawBar(graphics, center + 2, area.Bottom, barWidth, expenseHeight, Color.FromArgb(214, 221, 226));
+            DrawBar(graphics, GetBarBounds(center - barWidth - 2, area.Bottom, barWidth, incomeHeight), Palette.Primary);
+            DrawBar(graphics, GetBarBounds(center + 2, area.Bottom, barWidth, expenseHeight), Color.FromArgb(214, 221, 226));
 
             var size = graphics.MeasureString(bar.Label, labelFont);
 
@@ -655,11 +743,8 @@ internal sealed class BarsChart : Control
         x += 13 + graphics.MeasureString(label, font).Width + 18;
     }
 
-    private static void DrawBar(Graphics graphics, float x, float bottom, float width, float height, Color color)
+    private static void DrawBar(Graphics graphics, Rectangle bounds, Color color)
     {
-        var displayHeight = Math.Max(height, 6f);
-        var bounds = Rectangle.Round(new RectangleF(x, bottom - displayHeight, width, displayHeight));
-
         if (bounds.Width < 1 || bounds.Height < 1)
         {
             return;
