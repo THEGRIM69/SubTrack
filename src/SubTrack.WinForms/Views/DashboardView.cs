@@ -494,10 +494,10 @@ internal sealed class DashboardView : ViewBase
         };
         _kpisLayout = layout;
 
-        var income = Kpi("INGRESOS CONFIRMADOS", _income, "del mes");
-        var expenses = Kpi("GASTOS CONFIRMADOS", _expenses, "del mes");
-        var payments = Kpi("PAGOS DE SUSCRIPCIÓN", _payments, "cobros pagados");
-        var total = Kpi("TOTAL EGRESOS", _total, "gastos + suscripciones");
+        var income = Kpi("INGRESOS CONFIRMADOS", _income, "del mes", KpiIconKind.Income);
+        var expenses = Kpi("GASTOS CONFIRMADOS", _expenses, "del mes", KpiIconKind.Expense);
+        var payments = Kpi("PAGOS DE SUSCRIPCIÓN", _payments, "cobros pagados", KpiIconKind.Card);
+        var total = Kpi("TOTAL EGRESOS", _total, "gastos + suscripciones", KpiIconKind.Outflow);
 
         _income.Text = "—";
         _expenses.Text = "—";
@@ -845,7 +845,7 @@ internal sealed class DashboardView : ViewBase
         return card;
     }
 
-    private static Card Kpi(string caption, Label value, string hint)
+    private static Card Kpi(string caption, Label value, string hint, KpiIconKind iconKind)
     {
         var card = new Card
         {
@@ -868,13 +868,139 @@ internal sealed class DashboardView : ViewBase
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
-        layout.Controls.Add(Ui.Caption(caption), 0, 0);
+        var heading = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            BackColor = Palette.Surface,
+            FlowDirection = FlowDirection.LeftToRight,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            WrapContents = false
+        };
+        heading.Controls.Add(new KpiIcon(iconKind)
+        {
+            Margin = new Padding(0, 0, 8, 0),
+            Size = new Size(26, 26)
+        });
+        var title = Ui.Caption(caption);
+        title.AutoSize = false;
+        title.Height = 26;
+        title.Width = TextRenderer.MeasureText(title.Text, title.Font).Width;
+        title.TextAlign = ContentAlignment.MiddleLeft;
+        title.Margin = Padding.Empty;
+        heading.Controls.Add(title);
+
+        layout.Controls.Add(heading, 0, 0);
         layout.Controls.Add(value, 0, 1);
         layout.Controls.Add(Hint(8f, Palette.Muted, hint), 0, 2);
 
         card.Controls.Add(layout);
 
         return card;
+    }
+
+    private enum KpiIconKind
+    {
+        Income,
+        Expense,
+        Card,
+        Outflow
+    }
+
+    private sealed class KpiIcon(KpiIconKind kind) : Control
+    {
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            var graphics = e.Graphics;
+            graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+
+            var scale = Math.Min(ClientSize.Width, ClientSize.Height) / 24f;
+            var offsetX = (ClientSize.Width - 24 * scale) / 2f;
+            var offsetY = (ClientSize.Height - 24 * scale) / 2f;
+            graphics.TranslateTransform(offsetX, offsetY);
+            graphics.ScaleTransform(scale, scale);
+            using var pen = new Pen(Palette.PrimaryDeep, 1.8f)
+            {
+                StartCap = System.Drawing.Drawing2D.LineCap.Round,
+                EndCap = System.Drawing.Drawing2D.LineCap.Round,
+                LineJoin = System.Drawing.Drawing2D.LineJoin.Round
+            };
+
+            switch (kind)
+            {
+                case KpiIconKind.Income:
+                    DrawWallet(graphics, pen);
+                    break;
+                case KpiIconKind.Expense:
+                    DrawReceipt(graphics, pen);
+                    break;
+                case KpiIconKind.Card:
+                    DrawPaymentCard(graphics, pen);
+                    break;
+                case KpiIconKind.Outflow:
+                    DrawOutflow(graphics, pen);
+                    break;
+            }
+        }
+
+        private static void DrawWallet(Graphics graphics, Pen pen)
+        {
+            DrawRoundedRectangle(graphics, pen, new RectangleF(2.5f, 6f, 18f, 13f), 2);
+            graphics.DrawLine(pen, 5f, 6f, 8f, 3.5f);
+            graphics.DrawLine(pen, 8f, 3.5f, 18f, 3.5f);
+            graphics.DrawLine(pen, 18f, 3.5f, 19.5f, 5f);
+            DrawRoundedRectangle(graphics, pen, new RectangleF(14f, 10f, 7f, 5f), 2);
+            graphics.DrawEllipse(pen, 16.3f, 11.6f, 1.3f, 1.3f);
+            graphics.DrawLine(pen, 8f, 12.5f, 11f, 12.5f);
+            graphics.DrawLine(pen, 9.5f, 11f, 9.5f, 14f);
+        }
+
+        private static void DrawReceipt(Graphics graphics, Pen pen)
+        {
+            using var path = new System.Drawing.Drawing2D.GraphicsPath();
+            path.StartFigure();
+            path.AddLine(5f, 2.5f, 19f, 2.5f);
+            path.AddLine(19f, 2.5f, 19f, 18.5f);
+            path.AddLine(19f, 18.5f, 16.5f, 21f);
+            path.AddLine(16.5f, 21f, 14f, 18.5f);
+            path.AddLine(14f, 18.5f, 11.5f, 21f);
+            path.AddLine(11.5f, 21f, 9f, 18.5f);
+            path.AddLine(9f, 18.5f, 6.5f, 21f);
+            path.AddLine(6.5f, 21f, 5f, 19.5f);
+            path.AddLine(5f, 19.5f, 5f, 2.5f);
+            graphics.DrawPath(pen, path);
+            graphics.DrawLine(pen, 8f, 7f, 16f, 7f);
+            graphics.DrawLine(pen, 8f, 10.5f, 16f, 10.5f);
+            graphics.DrawLine(pen, 8f, 14f, 13f, 14f);
+        }
+
+        private static void DrawPaymentCard(Graphics graphics, Pen pen)
+        {
+            DrawRoundedRectangle(graphics, pen, new RectangleF(2f, 4.5f, 20f, 15f), 2);
+            graphics.DrawLine(pen, 3f, 9f, 21f, 9f);
+            graphics.DrawLine(pen, 6f, 14f, 10f, 14f);
+            graphics.DrawLine(pen, 6f, 16.5f, 8.5f, 16.5f);
+            graphics.DrawLine(pen, 16f, 14f, 18f, 14f);
+        }
+
+        private static void DrawOutflow(Graphics graphics, Pen pen)
+        {
+            graphics.DrawLine(pen, 3f, 5f, 10f, 12f);
+            graphics.DrawLine(pen, 10f, 12f, 10f, 7.5f);
+            graphics.DrawLine(pen, 10f, 12f, 14.5f, 12f);
+            graphics.DrawLine(pen, 13f, 8.5f, 19.5f, 15f);
+            graphics.DrawLine(pen, 19.5f, 15f, 15f, 15f);
+            graphics.DrawLine(pen, 19.5f, 15f, 19.5f, 10.5f);
+            graphics.DrawLine(pen, 4f, 20f, 20f, 20f);
+        }
+
+        private static void DrawRoundedRectangle(Graphics graphics, Pen pen, RectangleF bounds, int radius)
+        {
+            using var path = Shapes.Rounded(Rectangle.Round(bounds), radius);
+            graphics.DrawPath(pen, path);
+        }
     }
 
     private static Label ValueLabel(float size, FontStyle style, Color color) => new()
