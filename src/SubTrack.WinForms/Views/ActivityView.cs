@@ -17,11 +17,13 @@ internal sealed class ActivityView : ViewBase
     private readonly TableLayoutPanel _content = new()
     {
         BackColor = Palette.Canvas,
-        ColumnCount = 1,
-        RowCount = 2,
+        ColumnCount = 2,
+        RowCount = 1,
         Margin = Padding.Empty,
         Padding = Padding.Empty
     };
+    private Card? _upcomingCard;
+    private Card? _activityCard;
     private Dictionary<Guid, string> _names = new();
 
     public ActivityView(ViewContext context)
@@ -67,12 +69,11 @@ internal sealed class ActivityView : ViewBase
         Ui.Align(_upcoming, "Importe");
         Ui.Align(_activity, "Importe");
 
-        var upcomingCard = BuildList("Próximos pagos", _upcoming, _upcomingCount);
-        var activityCard = BuildList("Actividad reciente", _activity, _activityCount);
-        activityCard.Margin = new Padding(0, 0, 0, 14);
+        _upcomingCard = BuildList("Próximos pagos", _upcoming, _upcomingCount);
+        _activityCard = BuildList("Actividad reciente", _activity, _activityCount);
 
-        _content.Controls.Add(upcomingCard, 0, 0);
-        _content.Controls.Add(activityCard, 0, 1);
+        _content.Controls.Add(_upcomingCard, 0, 0);
+        _content.Controls.Add(_activityCard, 1, 0);
         _scrollHost.Controls.Add(_content);
         _scrollHost.SizeChanged += (_, _) => UpdateContentLayout();
         root.Controls.Add(_scrollHost, 0, 1);
@@ -230,19 +231,55 @@ internal sealed class ActivityView : ViewBase
         }
 
         var scale = _scrollHost.DeviceDpi / 96f;
-        var upcomingHeight = Math.Max((int)(300 * scale), _upcoming.Rows.Count * _upcoming.RowTemplate.Height + (int)(100 * scale));
-        var activityHeight = Math.Max((int)(500 * scale), _activity.Rows.Count * _activity.RowTemplate.Height + (int)(100 * scale));
+        if (_upcomingCard is null || _activityCard is null)
+        {
+            return;
+        }
+
+        var sideBySide = _scrollHost.ClientSize.Width >= (int)(1000 * scale);
+        var upcomingHeight = GetCardHeight(_upcoming, scale);
+        var activityHeight = GetCardHeight(_activity, scale);
         var width = _scrollHost.ClientSize.Width;
-        var height = upcomingHeight + activityHeight + (int)(14 * scale);
+        var gap = (int)(14 * scale);
 
         _content.SuspendLayout();
+        _content.ColumnCount = sideBySide ? 2 : 1;
+        _content.RowCount = sideBySide ? 1 : 2;
+        _content.ColumnStyles.Clear();
         _content.RowStyles.Clear();
-        _content.RowStyles.Add(new RowStyle(SizeType.Absolute, upcomingHeight));
-        _content.RowStyles.Add(new RowStyle(SizeType.Absolute, activityHeight));
+        if (sideBySide)
+        {
+            _content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            _content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            _content.RowStyles.Add(new RowStyle(SizeType.Absolute, Math.Max(upcomingHeight, activityHeight)));
+            _upcomingCard.Margin = new Padding(0, 0, gap / 2, 0);
+            _activityCard.Margin = new Padding(gap / 2, 0, 0, 0);
+            _content.SetCellPosition(_upcomingCard, new TableLayoutPanelCellPosition(0, 0));
+            _content.SetCellPosition(_activityCard, new TableLayoutPanelCellPosition(1, 0));
+        }
+        else
+        {
+            _content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            _content.RowStyles.Add(new RowStyle(SizeType.Absolute, upcomingHeight));
+            _content.RowStyles.Add(new RowStyle(SizeType.Absolute, activityHeight));
+            _upcomingCard.Margin = new Padding(0, 0, 0, gap);
+            _activityCard.Margin = Padding.Empty;
+            _content.SetCellPosition(_upcomingCard, new TableLayoutPanelCellPosition(0, 0));
+            _content.SetCellPosition(_activityCard, new TableLayoutPanelCellPosition(0, 1));
+        }
+
+        var height = sideBySide
+            ? Math.Max(upcomingHeight, activityHeight)
+            : upcomingHeight + activityHeight + gap;
         _content.Size = new Size(width, height);
         _scrollHost.AutoScrollMinSize = new Size(width, height);
         _content.ResumeLayout(true);
     }
+
+    private static int GetCardHeight(DataGridView grid, float scale) =>
+        Math.Max(
+            (int)(300 * scale),
+            grid.Rows.Count * grid.RowTemplate.Height + (int)(100 * scale));
 
     private static Card BuildList(string title, DataGridView grid, Label counter)
     {
