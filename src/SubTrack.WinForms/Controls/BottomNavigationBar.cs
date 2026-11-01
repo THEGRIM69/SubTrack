@@ -1,4 +1,5 @@
 using System.Drawing.Drawing2D;
+using SubTrack.WinForms.Theme;
 using SubTrack.WinForms.Themes;
 
 namespace SubTrack.WinForms.Controls;
@@ -16,7 +17,7 @@ internal sealed class BottomNavigationBar : UserControl
         AutoScaleMode = AutoScaleMode.Dpi;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        BackColor = AppTheme.Surface;
+        BackColor = Palette.Surface;
         DoubleBuffered = true;
         Margin = Padding.Empty;
         Padding = new Padding(8, 5, 8, 5);
@@ -25,7 +26,7 @@ internal sealed class BottomNavigationBar : UserControl
         {
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            BackColor = AppTheme.Surface,
+            BackColor = Palette.Surface,
             FlowDirection = FlowDirection.LeftToRight,
             Margin = Padding.Empty,
             Padding = Padding.Empty,
@@ -35,6 +36,7 @@ internal sealed class BottomNavigationBar : UserControl
         Controls.Add(_itemsPanel);
 
         AddItem("Dashboard", NavigationIcon.Dashboard, 102);
+        AddItem("Actividad", NavigationIcon.Activity, 94);
         AddItem("Suscripciones", NavigationIcon.Subscriptions, 124);
         AddItem("Cobros", NavigationIcon.Charges, 94);
         AddItem("Pagos", NavigationIcon.Payments, 94);
@@ -55,7 +57,7 @@ internal sealed class BottomNavigationBar : UserControl
         base.OnPaint(e);
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
         using GraphicsPath path = CreateRoundedRectangle(ClientRectangle, CornerRadius);
-        using var pen = new Pen(AppTheme.Border);
+        using var pen = new Pen(Palette.Border);
         e.Graphics.DrawPath(pen, path);
     }
 
@@ -113,6 +115,7 @@ internal sealed class BottomNavigationBar : UserControl
     private enum NavigationIcon
     {
         Dashboard,
+        Activity,
         Subscriptions,
         Charges,
         Payments,
@@ -131,11 +134,11 @@ internal sealed class BottomNavigationBar : UserControl
         public NavigationButton(NavigationIcon icon)
         {
             _icon = icon;
-            BackColor = AppTheme.Surface;
+            BackColor = Palette.Surface;
             Cursor = Cursors.Hand;
             FlatStyle = FlatStyle.Flat;
             Font = AppTheme.NavigationFont;
-            ForeColor = AppTheme.TextSecondary;
+            ForeColor = Palette.Muted;
             SetStyle(ControlStyles.AllPaintingInWmPaint |
                      ControlStyles.OptimizedDoubleBuffer |
                      ControlStyles.ResizeRedraw |
@@ -210,24 +213,24 @@ internal sealed class BottomNavigationBar : UserControl
         protected override void OnPaint(PaintEventArgs pevent)
         {
             pevent.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            pevent.Graphics.Clear(AppTheme.Surface);
+            pevent.Graphics.Clear(Palette.Surface);
 
             Rectangle bounds = ClientRectangle;
             bounds.Inflate(-1, -1);
             using GraphicsPath backgroundPath = CreateRoundedRectangle(bounds, ButtonRadius);
             Color background = _isPressed
-                ? AppTheme.PrimaryPressed
+                ? Palette.PrimaryDeep
                 : _isActive
-                    ? AppTheme.PrimarySoft
+                    ? Palette.Primary
                     : _isHovered || Focused
-                        ? AppTheme.NavigationHover
-                        : AppTheme.Surface;
+                        ? Palette.PrimarySoft
+                        : Palette.Surface;
             using (var brush = new SolidBrush(background))
             {
                 pevent.Graphics.FillPath(brush, backgroundPath);
             }
 
-            Color foreground = _isActive ? AppTheme.Primary : AppTheme.TextSecondary;
+            Color foreground = _isActive ? Palette.Ink : Palette.Muted;
             using var iconPen = new Pen(foreground, 1.8F)
             {
                 StartCap = LineCap.Round,
@@ -273,6 +276,13 @@ internal sealed class BottomNavigationBar : UserControl
                     graphics.DrawRectangle(pen, left, top + 1, right - left, bottom - top - 2);
                     graphics.DrawLine(pen, left + 4, top + 6, right - 4, top + 6);
                     graphics.DrawLine(pen, left + 4, top + 11, right - 7, top + 11);
+                    break;
+                case NavigationIcon.Activity:
+                    graphics.DrawLine(pen, left, centerY, left + 4, centerY);
+                    graphics.DrawLine(pen, left + 4, centerY, left + 7, top + 5);
+                    graphics.DrawLine(pen, left + 7, top + 5, left + 11, bottom - 5);
+                    graphics.DrawLine(pen, left + 11, bottom - 5, left + 15, top + 8);
+                    graphics.DrawLine(pen, left + 15, top + 8, right, top + 8);
                     break;
                 case NavigationIcon.Charges:
                     graphics.DrawEllipse(pen, left, top, right - left, bottom - top);

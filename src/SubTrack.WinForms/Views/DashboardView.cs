@@ -1,7 +1,6 @@
 using System.Runtime.InteropServices;
 using SubTrack.Core.Contracts;
 using SubTrack.Core.Domain.Entities;
-using SubTrack.Core.Domain.Enums;
 using SubTrack.WinForms.Theme;
 using SubTrack.WinForms.UI;
 
@@ -23,11 +22,7 @@ internal sealed class DashboardView : ViewBase
     private readonly Label _payments = ValueLabel(15f, FontStyle.Bold, Palette.Text);
     private readonly Label _total = ValueLabel(15f, FontStyle.Bold, Palette.Danger);
 
-    private readonly DataGridView _upcoming = Ui.Grid(("Fecha", 26f), ("Suscripción", 50f), ("Importe", 24f));
-    private readonly DataGridView _activity = Ui.Grid(("Fecha", 22f), ("Actividad", 42f), ("Importe", 20f), ("Estado", 16f));
     private readonly DataGridView _overdue = Ui.Grid(("Fecha", 26f), ("Suscripción", 50f), ("Importe", 24f));
-    private readonly Label _upcomingCount = Counter(Palette.PrimaryDeep);
-    private readonly Label _activityCount = Counter(Palette.Muted);
     private readonly Label _overdueCount = Counter(Palette.Danger);
     private readonly BarsChart _chart = new();
     private readonly Label _chartEmpty = Hint(9f, Palette.Muted, "No hay movimientos confirmados en los últimos 6 meses.");
@@ -40,24 +35,20 @@ internal sealed class DashboardView : ViewBase
         AutoScroll = true,
         BackColor = Palette.Canvas
     };
-    private readonly TableLayoutPanel _dashboardLayout = new()
-    {
-        BackColor = Palette.Canvas,
-        Margin = new Padding(0),
-        Padding = new Padding(0)
-    };
     private Control? _dashboardPanel;
     private Control? _summaryPanel;
     private Control? _dashboardMainPanel;
-    private TableLayoutPanel? _dashboardMainLayout;
+    private TableLayoutPanel? _heroLayout;
+    private Control[]? _heroCards;
+    private bool _heroCardsStacked;
     private Card? _balanceCard;
     private Card? _projectedCard;
     private Card? _subscriptionsCard;
     private TableLayoutPanel? _subscriptionsLayout;
-    private DashboardScrollPanel? _sidebarPanel;
-    private TableLayoutPanel? _sidebarContent;
+    private Label? _subscriptionsTitle;
+    private TableLayoutPanel? _kpisLayout;
+    private Control[]? _kpiCards;
     private Button? _summaryToggle;
-
     private Dictionary<Guid, string> _names = new();
 
     public DashboardView(ViewContext context)
@@ -108,9 +99,7 @@ internal sealed class DashboardView : ViewBase
         _contentPanel.Controls.Add(_dashboardPanel);
         root.Controls.Add(_contentPanel, 0, 1);
 
-        Ui.Align(_upcoming, "Importe");
         Ui.Align(_overdue, "Importe");
-        Ui.Align(_activity, "Importe");
 
         Controls.Add(root);
     }
@@ -119,11 +108,7 @@ internal sealed class DashboardView : ViewBase
     {
         var dashboardTask = Context.Services.Dashboard.GetAsync(new GetDashboardRequest(_month.Month));
         var subscriptionsTask = Context.Services.Subscriptions.GetAllAsync();
-        var paymentsTask = Context.Services.Payments.GetHistoryAsync(new PageRequest(1, 100));
-        var expensesTask = Context.Services.Expenses.GetHistoryAsync(new ExpenseHistoryRequest(new PageRequest(1, 100)));
-        var incomesTask = Context.Services.Incomes.GetHistoryAsync(new IncomeHistoryRequest(new PageRequest(1, 100)));
-
-        await Task.WhenAll(dashboardTask, subscriptionsTask, paymentsTask, expensesTask, incomesTask);
+        await Task.WhenAll(dashboardTask, subscriptionsTask);
 
         var result = await dashboardTask;
         if (Failed(result))
@@ -139,7 +124,7 @@ internal sealed class DashboardView : ViewBase
         }
         else
         {
-            _names = subscriptions.Value.ToDictionary(subscription => subscription.Id, subscription => subscription.Name);
+            _names = subscriptions.Value.ToDictionary(item => item.Id, item => item.Name);
         }
 
         var snapshot = result.Value;
@@ -164,9 +149,7 @@ internal sealed class DashboardView : ViewBase
         _summaryBalance.Text =
             $"Saldo disponible {Format.Currency(snapshot.CurrentBalanceCents)} · Ahorro proyectado {Format.Currency(snapshot.ProjectedSavingsCents)}";
 
-        Fill(_upcoming, snapshot.UpcomingCharges);
-
-        Fill(_overdue, snapshot.OverdueCharges);
+        Fill(snapshot.OverdueCharges);
 
         _overdueCount.Text = snapshot.OverdueCharges.Count == 0
             ? "Sin cargos vencidos"
@@ -174,25 +157,24 @@ internal sealed class DashboardView : ViewBase
 
         _overdueCount.ForeColor = snapshot.OverdueCharges.Count == 0 ? Palette.PrimaryDeep : Palette.Danger;
 
-        var payments = await paymentsTask;
-        var expenses = await expensesTask;
-        var incomes = await incomesTask;
-        var activityAvailable = !payments.IsFailure && !expenses.IsFailure && !incomes.IsFailure;
-
-        if (!activityAvailable)
-        {
-            if (payments.IsFailure) Failed(payments);
-            if (expenses.IsFailure) Failed(expenses);
-            if (incomes.IsFailure) Failed(incomes);
-            _activity.Rows.Clear();
-            _activityCount.Text = "No se pudo cargar";
-        }
-        else
-        {
-            FillActivity(payments.Value.Items, expenses.Value.Items, incomes.Value.Items);
-        }
-
         await LoadChartAsync();
+    }
+
+    private void Fill(IReadOnlyList<ScheduledCharge> charges)
+    {
+        _overdue.Rows.Clear();
+
+        foreach (var charge in charges)
+        {
+            var name = _names.TryGetValue(charge.SubscriptionId, out var value)
+                ? value
+                : "Suscripción no disponible";
+            var index = _overdue.Rows.Add(
+                Format.Date(charge.ScheduledDate),
+                name,
+                Format.Money(charge.AmountCents));
+            _overdue.Rows[index].Tag = charge;
+        }
     }
 
     private async Task LoadChartAsync()
@@ -259,11 +241,7 @@ internal sealed class DashboardView : ViewBase
         _expenses.Text = "—";
         _payments.Text = "—";
         _total.Text = "—";
-        _upcoming.Rows.Clear();
-        _activity.Rows.Clear();
         _overdue.Rows.Clear();
-        _upcomingCount.Text = "No se pudo cargar";
-        _activityCount.Text = "No se pudo cargar";
         _overdueCount.Text = "No se pudo cargar";
         _chart.SetData(Array.Empty<BarsChart.Bar>());
         _chart.Visible = false;
@@ -322,131 +300,16 @@ internal sealed class DashboardView : ViewBase
         await DataChangedAsync(DataChangeKind.Charges);
     }
 
-    private void Fill(DataGridView grid, IReadOnlyList<ScheduledCharge> charges)
-    {
-        grid.Rows.Clear();
-
-        _upcomingCount.Text = charges.Count == 0
-            ? "Sin cargos pendientes próximos"
-            : $"{charges.Count} próximos";
-
-        foreach (var charge in charges)
-        {
-            var name = _names.TryGetValue(charge.SubscriptionId, out var value)
-                ? value
-                : "Suscripción no disponible";
-
-            var index = grid.Rows.Add(
-                Format.Date(charge.ScheduledDate),
-                name,
-                Format.Money(charge.AmountCents));
-
-            grid.Rows[index].Tag = charge;
-        }
-    }
-
-    private void FillActivity(
-        IReadOnlyList<Payment> payments,
-        IReadOnlyList<Expense> expenses,
-        IReadOnlyList<Income> incomes)
-    {
-        var items = new List<ActivityItem>();
-
-        foreach (var payment in payments)
-        {
-            var (status, color) = Ui.PaymentBadge(payment.Status);
-            var activityDate = payment.Status == PaymentStatus.Cancelled && payment.CancelledAt is { } cancelledAt
-                ? DateOnly.FromDateTime(cancelledAt.LocalDateTime)
-                : payment.PaymentDate;
-            var sortAt = payment.Status == PaymentStatus.Cancelled && payment.CancelledAt is { } cancelled
-                ? cancelled.LocalDateTime
-                : payment.PaymentDate.ToDateTime(TimeOnly.MinValue);
-
-            items.Add(new ActivityItem(
-                sortAt,
-                activityDate,
-                "Pago de suscripción",
-                payment.AmountCents,
-                status,
-                color));
-        }
-
-        foreach (var expense in expenses.Where(item =>
-                     item.Status is ExpenseStatus.Confirmed or ExpenseStatus.Cancelled))
-        {
-            var (status, color) = Ui.ExpenseBadge(expense.Status);
-            var cancelled = expense.Status == ExpenseStatus.Cancelled;
-            var activityDate = cancelled && expense.CancelledAt is { } cancelledAt
-                ? DateOnly.FromDateTime(cancelledAt.LocalDateTime)
-                : expense.ActualDate ?? expense.PlannedDate;
-            var sortAt = cancelled && expense.CancelledAt is { } cancellation
-                ? cancellation.LocalDateTime
-                : activityDate.ToDateTime(TimeOnly.MinValue);
-
-            items.Add(new ActivityItem(
-                sortAt,
-                activityDate,
-                $"Gasto · {expense.Concept}",
-                expense.AmountCents,
-                status,
-                color));
-        }
-
-        foreach (var income in incomes.Where(item =>
-                     item.Status is IncomeStatus.Confirmed or IncomeStatus.Cancelled))
-        {
-            var (status, color) = Ui.IncomeBadge(income.Status);
-            var cancelled = income.Status == IncomeStatus.Cancelled;
-            var activityDate = cancelled && income.CancelledAt is { } cancelledAt
-                ? DateOnly.FromDateTime(cancelledAt.LocalDateTime)
-                : income.ActualDate ?? income.PlannedDate;
-            var sortAt = cancelled && income.CancelledAt is { } cancellation
-                ? cancellation.LocalDateTime
-                : activityDate.ToDateTime(TimeOnly.MinValue);
-
-            items.Add(new ActivityItem(
-                sortAt,
-                activityDate,
-                $"Ingreso · {income.Concept}",
-                income.AmountCents,
-                status,
-                color));
-        }
-
-        var recent = items
-            .OrderByDescending(item => item.SortAt)
-            .Take(10)
-            .ToArray();
-
-        _activity.Rows.Clear();
-        _activityCount.Text = recent.Length == 0 ? "Sin actividad reciente" : $"{recent.Length} recientes";
-
-        foreach (var item in recent)
-        {
-            var index = _activity.Rows.Add(
-                Format.Date(item.Date),
-                item.Concept,
-                Format.Money(item.AmountCents),
-                item.Status);
-
-            Ui.Tint(_activity.Rows[index], "Estado", item.Color);
-            _activity.Rows[index].Tag = item;
-        }
-    }
-
     private Control BuildHero()
     {
         var row = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 2,
+            ColumnCount = 3,
             RowCount = 1,
             BackColor = Palette.Canvas,
-            Margin = new Padding(0, 0, 0, 14)
+            Margin = Padding.Empty
         };
-
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
 
         var balanceCaption = Ui.Caption("SALDO ACTUAL");
         balanceCaption.ForeColor = Color.FromArgb(150, 162, 172);
@@ -465,7 +328,7 @@ internal sealed class DashboardView : ViewBase
             _balance,
             _balanceHint,
             Palette.Ink,
-            new Padding(24, 20, 24, 18),
+            new Padding(24, 12, 24, 12),
             new Padding(0, 0, 7, 0),
             28f);
         _projectedCard = BuildFinancialIndicator(
@@ -473,14 +336,108 @@ internal sealed class DashboardView : ViewBase
             _projected,
             _projectedHint,
             Palette.PrimarySoft,
-            new Padding(24, 20, 24, 18),
+            new Padding(24, 12, 24, 12),
             new Padding(7, 0, 0, 0),
             28f);
 
-        row.Controls.Add(_balanceCard, 0, 0);
-        row.Controls.Add(_projectedCard, 1, 0);
+        _subscriptionsCard = (Card)BuildSubscriptionsInfo();
+        _heroLayout = row;
+        _heroCards = [_balanceCard, _projectedCard, _subscriptionsCard];
+        row.SizeChanged += (_, _) => UpdateHeroLayout();
+        row.DpiChangedAfterParent += (_, _) => UpdateHeroLayout();
+        _balance.TextChanged += (_, _) => UpdateHeroLayout();
+        _projected.TextChanged += (_, _) => UpdateHeroLayout();
+        _active.TextChanged += (_, _) => UpdateHeroLayout();
+        _activeHint.TextChanged += (_, _) => UpdateHeroLayout();
+        UpdateHeroLayout();
 
         return row;
+    }
+
+    private void UpdateHeroLayout()
+    {
+        if (_heroLayout is null || _heroCards is null || _heroLayout.ClientSize.Width <= 0)
+        {
+            return;
+        }
+
+        var scale = _heroLayout.DeviceDpi / 96f;
+        var subscriptionWidth = GetSubscriptionsCardWidth(scale);
+        var financialWidth = GetFinancialCardMinimumWidth(scale);
+        var gap = (int)(8 * scale);
+        var minimumHorizontalWidth = (financialWidth * 2) + subscriptionWidth + (gap * 2);
+        var stackCards = _heroLayout.ClientSize.Width < minimumHorizontalWidth;
+        _heroCardsStacked = stackCards;
+        var columnCount = stackCards ? 1 : 3;
+        var rowCount = stackCards ? 3 : 1;
+
+        _heroLayout.SuspendLayout();
+        _heroLayout.ColumnCount = columnCount;
+        _heroLayout.RowCount = rowCount;
+        _heroLayout.ColumnStyles.Clear();
+        _heroLayout.RowStyles.Clear();
+
+        if (stackCards)
+        {
+            _heroLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            for (var row = 0; row < rowCount; row++)
+            {
+                _heroLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / rowCount));
+            }
+        }
+        else
+        {
+            _heroLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            _heroLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            _heroLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, subscriptionWidth));
+            _heroLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        }
+
+        for (var index = 0; index < _heroCards.Length; index++)
+        {
+            var row = stackCards ? index : 0;
+            var column = stackCards ? 0 : index;
+            _heroCards[index].Margin = new Padding(
+                0,
+                0,
+                stackCards || index == _heroCards.Length - 1 ? 0 : gap,
+                stackCards && index < _heroCards.Length - 1 ? gap : 0);
+
+            if (_heroCards[index].Parent != _heroLayout)
+            {
+                _heroLayout.Controls.Add(_heroCards[index], column, row);
+            }
+            else
+            {
+                _heroLayout.SetCellPosition(
+                    _heroCards[index],
+                    new TableLayoutPanelCellPosition(column, row));
+            }
+
+            _heroLayout.SetRowSpan(_heroCards[index], 1);
+        }
+
+        _heroLayout.ResumeLayout(true);
+        UpdateDashboardLayout();
+    }
+
+    private int GetFinancialCardMinimumWidth(float scale)
+    {
+        var smallestAmountFont = Palette.Font(17f, FontStyle.Bold);
+        var balanceWidth = TextRenderer.MeasureText(_balance.Text, smallestAmountFont).Width;
+        var projectedWidth = TextRenderer.MeasureText(_projected.Text, smallestAmountFont).Width;
+        var horizontalPadding = (int)(24 * scale);
+        return Math.Max(balanceWidth, projectedWidth) + horizontalPadding;
+    }
+
+    private int GetSubscriptionsCardWidth(float scale)
+    {
+        var titleWidth = TextRenderer.MeasureText("Suscripciones activas", Palette.Font(9f, FontStyle.Bold)).Width;
+        var hintWidth = TextRenderer.MeasureText(_activeHint.Text, Palette.Font(8f)).Width;
+        var countWidth = TextRenderer.MeasureText(_active.Text, Palette.Font(18f, FontStyle.Bold)).Width;
+        var leftWidth = Math.Max(titleWidth, hintWidth);
+        var contentWidth = Math.Max(leftWidth / 0.76f, countWidth / 0.24f);
+        return (int)Math.Ceiling(contentWidth + (20 * scale));
     }
 
     private Card BuildFinancialIndicator(
@@ -527,19 +484,15 @@ internal sealed class DashboardView : ViewBase
 
     private Control BuildKpis()
     {
-        var row = new TableLayoutPanel
+        var layout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 4,
-            RowCount = 1,
+            ColumnCount = 2,
+            RowCount = 2,
             BackColor = Palette.Canvas,
-            Margin = new Padding(0, 0, 0, 14)
+            Margin = Padding.Empty
         };
-
-        for (var index = 0; index < 4; index++)
-        {
-            row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
-        }
+        _kpisLayout = layout;
 
         var income = Kpi("INGRESOS CONFIRMADOS", _income, "del mes");
         var expenses = Kpi("GASTOS CONFIRMADOS", _expenses, "del mes");
@@ -550,31 +503,75 @@ internal sealed class DashboardView : ViewBase
         _expenses.Text = "—";
         _payments.Text = "—";
         _total.Text = "—";
-        _upcomingCount.Text = "Cargando datos...";
-        _activityCount.Text = "Cargando datos...";
         _overdueCount.Text = "Cargando datos...";
 
-        income.Margin = new Padding(0, 0, 14, 0);
-        expenses.Margin = new Padding(0, 0, 14, 0);
-        payments.Margin = new Padding(0, 0, 14, 0);
+        _kpiCards = [income, expenses, payments, total];
+        layout.SizeChanged += (_, _) => UpdateKpisLayout();
+        layout.DpiChangedAfterParent += (_, _) => UpdateKpisLayout();
+        UpdateKpisLayout();
 
-        row.Controls.Add(income, 0, 0);
-        row.Controls.Add(expenses, 1, 0);
-        row.Controls.Add(payments, 2, 0);
-        row.Controls.Add(total, 3, 0);
+        return layout;
+    }
 
-        return row;
+    private void UpdateKpisLayout()
+    {
+        if (_kpisLayout is null || _kpiCards is null || _kpisLayout.ClientSize.Width <= 0)
+        {
+            return;
+        }
+
+        var scale = _kpisLayout.DeviceDpi / 96f;
+        var twoColumns = _kpisLayout.ClientSize.Width >= (int)(480 * scale);
+        var columnCount = twoColumns ? 2 : 1;
+        var rowCount = twoColumns ? 2 : 4;
+
+        _kpisLayout.SuspendLayout();
+        _kpisLayout.ColumnCount = columnCount;
+        _kpisLayout.RowCount = rowCount;
+        _kpisLayout.ColumnStyles.Clear();
+        _kpisLayout.RowStyles.Clear();
+
+        for (var column = 0; column < columnCount; column++)
+        {
+            _kpisLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / columnCount));
+        }
+
+        for (var row = 0; row < rowCount; row++)
+        {
+            _kpisLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / rowCount));
+        }
+
+        var horizontalGap = (int)(8 * scale);
+        var verticalGap = (int)(5 * scale);
+        for (var index = 0; index < _kpiCards.Length; index++)
+        {
+            var row = twoColumns ? index / 2 : index;
+            var column = twoColumns ? index % 2 : 0;
+            _kpiCards[index].Margin = new Padding(
+                0,
+                0,
+                column == 0 && twoColumns ? horizontalGap : 0,
+                row < rowCount - 1 ? verticalGap : 0);
+            if (_kpiCards[index].Parent != _kpisLayout)
+            {
+                _kpisLayout.Controls.Add(_kpiCards[index], column, row);
+            }
+            else
+            {
+                _kpisLayout.SetCellPosition(
+                    _kpiCards[index],
+                    new TableLayoutPanelCellPosition(column, row));
+            }
+        }
+
+        _kpisLayout.ResumeLayout(true);
     }
 
     private Control BuildDashboardPanel()
     {
         _dashboardMainPanel = BuildDashboardMainPanel();
-        _dashboardLayout.Controls.Add(_dashboardMainPanel, 0, 0);
-        _sidebarPanel = BuildSidebar();
-        _dashboardLayout.Controls.Add(_sidebarPanel, 1, 0);
-        _dashboardScrollHost.Controls.Add(_dashboardLayout);
+        _dashboardScrollHost.Controls.Add(_dashboardMainPanel);
         _dashboardScrollHost.SizeChanged += (_, _) => UpdateDashboardLayout();
-        _sidebarPanel.SizeChanged += (_, _) => UpdateSidebarLayout();
         UpdateDashboardLayout();
 
         return _dashboardScrollHost;
@@ -584,21 +581,17 @@ internal sealed class DashboardView : ViewBase
     {
         var panel = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill,
+            Dock = DockStyle.Top,
             ColumnCount = 1,
-            RowCount = 3,
+            RowCount = 2,
             BackColor = Palette.Canvas,
             Margin = new Padding(0)
         };
 
-        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 42));
-        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 17));
-        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 41));
-        _dashboardMainLayout = panel;
-
+        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 38));
+        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 62));
         panel.Controls.Add(BuildHero(), 0, 0);
-        panel.Controls.Add(BuildSubscriptionsInfo(), 0, 1);
-        panel.Controls.Add(BuildKpis(), 0, 2);
+        panel.Controls.Add(BuildKpis(), 0, 1);
 
         return panel;
     }
@@ -609,27 +602,48 @@ internal sealed class DashboardView : ViewBase
         {
             Dock = DockStyle.Fill,
             Radius = 14,
-            Padding = new Padding(16, 8, 16, 8),
-            Margin = new Padding(0, 0, 0, 14)
+            Padding = new Padding(10, 3, 10, 3),
+            Margin = Padding.Empty
         };
 
         var layout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 3,
+            ColumnCount = 2,
+            RowCount = 2,
             BackColor = Palette.Surface,
             Margin = new Padding(0)
         };
         _subscriptionsLayout = layout;
 
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 78));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 22));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 58));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 42));
+
         _active.Text = "—";
         _activeHint.Text = "Cargando datos...";
         _activeHint.TextAlign = ContentAlignment.MiddleLeft;
+        _active.TextAlign = ContentAlignment.MiddleRight;
+        _active.Margin = Padding.Empty;
+        _activeHint.Margin = Padding.Empty;
+        _activeHint.Font = Palette.Font(8f);
 
-        layout.Controls.Add(Ui.Caption("SUSCRIPCIONES ACTIVAS"), 0, 0);
-        layout.Controls.Add(_active, 0, 1);
-        layout.Controls.Add(_activeHint, 0, 2);
+        _subscriptionsTitle = new Label
+        {
+            AutoSize = false,
+            Dock = DockStyle.Fill,
+            Font = Palette.Font(9f, FontStyle.Bold),
+            ForeColor = Palette.Text,
+            Text = "Suscripciones activas",
+            TextAlign = ContentAlignment.MiddleLeft,
+            BackColor = Color.Transparent,
+            Margin = Padding.Empty
+        };
+        layout.Controls.Add(_subscriptionsTitle, 0, 0);
+        layout.Controls.Add(_activeHint, 0, 1);
+        layout.Controls.Add(_active, 1, 0);
+        layout.SetRowSpan(_active, 2);
         _subscriptionsCard.Controls.Add(layout);
         _subscriptionsCard.SizeChanged += (_, _) => UpdateSubscriptionsLayout();
         _subscriptionsCard.DpiChangedAfterParent += (_, _) => UpdateSubscriptionsLayout();
@@ -648,7 +662,7 @@ internal sealed class DashboardView : ViewBase
 
         var dpiScale = card.DeviceDpi / 96f;
         var horizontalPadding = Math.Clamp(card.ClientSize.Width / 16, (int)(12 * dpiScale), (int)(24 * dpiScale));
-        var verticalPadding = (int)(18 * dpiScale);
+        var verticalPadding = (int)(12 * dpiScale);
         card.Padding = new Padding(horizontalPadding, verticalPadding, horizontalPadding, verticalPadding);
         if (card == _balanceCard)
         {
@@ -680,161 +694,75 @@ internal sealed class DashboardView : ViewBase
         }
 
         var dpiScale = _subscriptionsCard.DeviceDpi / 96f;
-        var horizontalLayout = _subscriptionsCard.ClientSize.Width >= (int)(480 * dpiScale);
+        var horizontalLayout = _subscriptionsCard.ClientSize.Width >= GetSubscriptionsCardWidth(dpiScale);
         _subscriptionsCard.Padding = new Padding(
-            (int)(16 * dpiScale),
-            (int)(8 * dpiScale),
-            (int)(16 * dpiScale),
-            (int)(8 * dpiScale));
+            (int)(10 * dpiScale),
+            (int)(3 * dpiScale),
+            (int)(10 * dpiScale),
+            (int)(3 * dpiScale));
 
         _subscriptionsLayout.SuspendLayout();
-        _subscriptionsLayout.ColumnCount = horizontalLayout ? 3 : 1;
-        _subscriptionsLayout.RowCount = horizontalLayout ? 1 : 3;
+        _subscriptionsLayout.ColumnCount = horizontalLayout ? 2 : 1;
+        _subscriptionsLayout.RowCount = horizontalLayout ? 2 : 3;
         _subscriptionsLayout.ColumnStyles.Clear();
         _subscriptionsLayout.RowStyles.Clear();
 
         if (horizontalLayout)
         {
-            _subscriptionsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            _subscriptionsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, (int)(72 * dpiScale)));
-            _subscriptionsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            _subscriptionsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            _subscriptionsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 76));
+            _subscriptionsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 24));
+            _subscriptionsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 58));
+            _subscriptionsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 42));
+            _subscriptionsLayout.SetCellPosition(_subscriptionsTitle!, new TableLayoutPanelCellPosition(0, 0));
+            _subscriptionsLayout.SetCellPosition(_activeHint, new TableLayoutPanelCellPosition(0, 1));
             _subscriptionsLayout.SetCellPosition(_active, new TableLayoutPanelCellPosition(1, 0));
-            _subscriptionsLayout.SetCellPosition(_activeHint, new TableLayoutPanelCellPosition(2, 0));
-            _activeHint.TextAlign = ContentAlignment.MiddleRight;
-            _active.Font = Palette.Font(26f, FontStyle.Bold);
+            _subscriptionsLayout.SetRowSpan(_active, 2);
         }
         else
         {
             _subscriptionsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             _subscriptionsLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            _subscriptionsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             _subscriptionsLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            _subscriptionsLayout.SetCellPosition(_active, new TableLayoutPanelCellPosition(0, 1));
-            _subscriptionsLayout.SetCellPosition(_activeHint, new TableLayoutPanelCellPosition(0, 2));
+            _subscriptionsLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            _subscriptionsLayout.SetCellPosition(_subscriptionsTitle!, new TableLayoutPanelCellPosition(0, 0));
+            _subscriptionsLayout.SetCellPosition(_activeHint, new TableLayoutPanelCellPosition(0, 1));
+            _subscriptionsLayout.SetCellPosition(_active, new TableLayoutPanelCellPosition(0, 2));
             _activeHint.TextAlign = ContentAlignment.MiddleLeft;
-            _active.Font = Palette.Font(23f, FontStyle.Bold);
+            _subscriptionsLayout.SetRowSpan(_active, 1);
         }
 
+        _active.Font = Palette.Font(horizontalLayout ? 18f : 21f, FontStyle.Bold);
         _subscriptionsLayout.ResumeLayout(true);
 
-        if (_dashboardMainLayout is not null && _dashboardMainLayout.RowStyles.Count == 3)
-        {
-            _dashboardMainLayout.RowStyles[0].Height = horizontalLayout ? 42 : 38;
-            _dashboardMainLayout.RowStyles[1].Height = horizontalLayout ? 17 : 23;
-            _dashboardMainLayout.RowStyles[2].Height = horizontalLayout ? 41 : 39;
-        }
-    }
-
-    private DashboardScrollPanel BuildSidebar()
-    {
-        var panel = new DashboardScrollPanel
-        {
-            Dock = DockStyle.Fill,
-            AutoScroll = true,
-            BackColor = Palette.Canvas,
-            Margin = new Padding(0)
-        };
-
-        _sidebarContent = new TableLayoutPanel
-        {
-            Dock = DockStyle.Top,
-            ColumnCount = 1,
-            RowCount = 2,
-            BackColor = Palette.Canvas,
-            Margin = new Padding(0)
-        };
-        _sidebarContent.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-        _sidebarContent.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-        _sidebarContent.Controls.Add(BuildList("Próximos pagos", _upcoming, _upcomingCount, true), 0, 0);
-        _sidebarContent.Controls.Add(BuildList("Actividad reciente", _activity, _activityCount, false), 0, 1);
-        _upcoming.RowTemplate.Height = 38;
-        _upcoming.ColumnHeadersHeight = 34;
-        _upcoming.ScrollBars = ScrollBars.None;
-        _activity.RowTemplate.Height = 38;
-        _activity.ColumnHeadersHeight = 34;
-        _activity.ScrollBars = ScrollBars.None;
-        _overdue.ScrollBars = ScrollBars.None;
-        panel.Controls.Add(_sidebarContent);
-
-        return panel;
     }
 
     private void UpdateDashboardLayout()
     {
         if (_dashboardMainPanel is null ||
-            _sidebarPanel is null ||
             _dashboardScrollHost.ClientSize.Width <= 0 ||
             _dashboardScrollHost.ClientSize.Height <= 0)
         {
             return;
         }
 
-        var viewportWidth = _dashboardScrollHost.ClientSize.Width;
-        var viewportHeight = _dashboardScrollHost.ClientSize.Height;
-        var useColumns = viewportWidth >= 1040;
-        var mainHeight = Math.Max(440, (int)(viewportHeight * 0.8));
-        var sidebarHeight = Math.Max(560, viewportHeight);
-        var layoutHeight = useColumns
-            ? viewportHeight
-            : mainHeight + sidebarHeight;
-        var layoutWidth = viewportWidth;
-
-        _dashboardLayout.SuspendLayout();
-        _dashboardScrollHost.SuspendLayout();
-        _dashboardLayout.ColumnCount = useColumns ? 2 : 1;
-        _dashboardLayout.RowCount = useColumns ? 1 : 2;
-        _dashboardLayout.ColumnStyles.Clear();
-        _dashboardLayout.RowStyles.Clear();
-
-        if (useColumns)
+        var contentWidth = _dashboardScrollHost.ClientSize.Width;
+        var scale = _dashboardScrollHost.DeviceDpi / 96f;
+        var minStackedHeight = (int)(600 * scale);
+        var contentHeight = _heroCardsStacked
+            ? Math.Max(minStackedHeight, _dashboardScrollHost.ClientSize.Height)
+            : _dashboardScrollHost.ClientSize.Height;
+        _dashboardMainPanel.Size = new Size(contentWidth, contentHeight);
+        if (_dashboardMainPanel is TableLayoutPanel layout && layout.RowStyles.Count == 2)
         {
-            _dashboardLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 62));
-            _dashboardLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 38));
-            _dashboardLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            _dashboardLayout.SetCellPosition(
-                _sidebarPanel,
-                new TableLayoutPanelCellPosition(1, 0));
-            _dashboardMainPanel.Height = layoutHeight;
-            _sidebarPanel.Height = layoutHeight;
-        }
-        else
-        {
-            _dashboardLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            _dashboardLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, mainHeight));
-            _dashboardLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, sidebarHeight));
-            _dashboardLayout.SetCellPosition(
-                _sidebarPanel,
-                new TableLayoutPanelCellPosition(0, 1));
-            _dashboardMainPanel.Height = mainHeight;
-            _sidebarPanel.Height = sidebarHeight;
+            var heroHeight = (int)((_heroCardsStacked ? 270 : 140) * scale);
+            var kpisHeight = Math.Max(0, contentHeight - heroHeight);
+            layout.RowStyles[0].SizeType = SizeType.Absolute;
+            layout.RowStyles[0].Height = heroHeight;
+            layout.RowStyles[1].SizeType = SizeType.Absolute;
+            layout.RowStyles[1].Height = kpisHeight;
         }
 
-        _dashboardLayout.SetCellPosition(
-            _dashboardMainPanel,
-            new TableLayoutPanelCellPosition(0, 0));
-        _dashboardLayout.Location = Point.Empty;
-        _dashboardLayout.Size = new Size(layoutWidth, layoutHeight);
-        _dashboardScrollHost.AutoScrollMinSize = new Size(layoutWidth, layoutHeight);
-        _dashboardScrollHost.ResumeLayout(true);
-        _dashboardLayout.ResumeLayout(true);
-        UpdateSidebarLayout();
-    }
-
-    private void UpdateSidebarLayout()
-    {
-        if (_sidebarPanel is null ||
-            _sidebarContent is null ||
-            _sidebarPanel.ClientSize.Width <= 0 ||
-            _sidebarPanel.ClientSize.Height <= 0)
-        {
-            return;
-        }
-
-        var contentHeight = Math.Max(640, _sidebarPanel.ClientSize.Height);
-        var contentWidth = _sidebarPanel.ClientSize.Width;
-        _sidebarContent.Size = new Size(contentWidth, contentHeight);
-        _sidebarPanel.AutoScrollMinSize = new Size(contentWidth, contentHeight);
+        _dashboardScrollHost.AutoScrollMinSize = new Size(contentWidth, contentHeight);
     }
 
     private Control BuildSummaryPanel()
@@ -923,7 +851,7 @@ internal sealed class DashboardView : ViewBase
         {
             Dock = DockStyle.Fill,
             Radius = 14,
-            Padding = new Padding(18, 12, 18, 10),
+            Padding = new Padding(12, 6, 12, 5),
             Margin = new Padding(0)
         };
 
@@ -982,14 +910,6 @@ internal sealed class DashboardView : ViewBase
         BackColor = Color.Transparent,
         Margin = new Padding(0)
     };
-
-    private sealed record ActivityItem(
-        DateTime SortAt,
-        DateOnly Date,
-        string Concept,
-        long AmountCents,
-        string Status,
-        Color Color);
 
     private sealed class DashboardScrollPanel : Panel
     {

@@ -121,12 +121,13 @@ public sealed class MainForm : Form
         };
 
         RegisterNavigation("Dashboard", 0, ctx => new DashboardView(ctx));
-        RegisterNavigation("Suscripciones", 1, ctx => new SubscriptionsView(ctx));
-        RegisterNavigation("Cobros", 2, ctx => new ChargesView(ctx, ChargesViewMode.Charges));
-        RegisterNavigation("Pagos", 3, ctx => new PaymentsView(ctx));
-        RegisterNavigation("Gastos", 4, ctx => new ExpensesView(ctx));
-        RegisterNavigation("Ingresos", 5, ctx => new IncomesView(ctx));
-        RegisterNavigation("Configuración", 6, ctx => new SettingsView(ctx));
+        RegisterNavigation("Actividad", 1, ctx => new ActivityView(ctx));
+        RegisterNavigation("Suscripciones", 2, ctx => new SubscriptionsView(ctx));
+        RegisterNavigation("Cobros", 3, ctx => new ChargesView(ctx, ChargesViewMode.Charges));
+        RegisterNavigation("Pagos", 4, ctx => new PaymentsView(ctx));
+        RegisterNavigation("Gastos", 5, ctx => new ExpensesView(ctx));
+        RegisterNavigation("Ingresos", 6, ctx => new IncomesView(ctx));
+        RegisterNavigation("Configuración", 7, ctx => new SettingsView(ctx));
 
         Shown += async (_, _) => await ShowSectionAsync("Dashboard");
     }
@@ -298,6 +299,11 @@ public sealed class MainForm : Form
                         || change.HasFlag(DataChangeKind.Expenses)
                         || change.HasFlag(DataChangeKind.Incomes)
                         || change.HasFlag(DataChangeKind.OpeningBalance),
+                    "Actividad" => change.HasFlag(DataChangeKind.Subscriptions)
+                        || change.HasFlag(DataChangeKind.Charges)
+                        || change.HasFlag(DataChangeKind.Payments)
+                        || change.HasFlag(DataChangeKind.Expenses)
+                        || change.HasFlag(DataChangeKind.Incomes),
                     "Suscripciones" => change.HasFlag(DataChangeKind.Subscriptions)
                         || change.HasFlag(DataChangeKind.Charges)
                         || change.HasFlag(DataChangeKind.Payments),
