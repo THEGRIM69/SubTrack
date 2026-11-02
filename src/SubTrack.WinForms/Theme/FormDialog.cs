@@ -76,7 +76,7 @@ internal sealed class FormDialog : Form
             Text = description,
             AutoSize = true,
             MaximumSize = new Size(350, 0),
-            Font = Palette.Font(9.25f),
+            Font = Palette.Font(9.5f),
             ForeColor = Palette.Muted,
             Margin = new Padding(0, 6, 0, 12),
             Visible = !string.IsNullOrWhiteSpace(description)
@@ -262,7 +262,7 @@ internal sealed class FormDialog : Form
             AutoSize = true,
             MaximumSize = new Size(340, 0),
             ForeColor = Palette.Muted,
-            Font = Palette.Font(8.25f, FontStyle.Italic),
+            Font = Palette.Font(9f, FontStyle.Italic),
             Margin = new Padding(0, 0, 0, 12)
         };
 
@@ -306,7 +306,7 @@ internal sealed class FormDialog : Form
             {
                 Text = label,
                 AutoSize = true,
-                Font = Palette.Font(8.25f, FontStyle.Bold),
+                Font = Palette.Font(9f, FontStyle.Bold),
                 ForeColor = Palette.Muted,
                 Margin = new Padding(0, 0, 0, 5)
             }, 0, row);

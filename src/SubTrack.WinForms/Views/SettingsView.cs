@@ -21,7 +21,9 @@ internal sealed class SettingsView : ViewBase
     };
     private FlatButton? _clearOpeningButton;
     private Control? _categoriesPanel;
+    private Control? _leftPanel;
     private Control? _sidePanel;
+    private Control? _maintenancePanel;
 
     private readonly Label _categoriesSummary = new()
     {
@@ -83,9 +85,11 @@ internal sealed class SettingsView : ViewBase
     protected override void Build()
     {
         _categoriesPanel = BuildCategories();
+        _maintenancePanel = BuildMaintenance();
+        _leftPanel = BuildLeft();
         _sidePanel = BuildSide();
 
-        _rootLayout.Controls.Add(_categoriesPanel, 0, 0);
+        _rootLayout.Controls.Add(_leftPanel, 0, 0);
         _rootLayout.Controls.Add(_sidePanel, 1, 0);
         _scrollHost.Controls.Add(_rootLayout);
         _scrollHost.SizeChanged += (_, _) => UpdateResponsiveLayout();
@@ -149,37 +153,62 @@ internal sealed class SettingsView : ViewBase
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 3,
+            RowCount = 2,
             BackColor = Palette.Canvas,
             Margin = new Padding(0),
             Padding = new Padding(0)
         };
 
-        side.RowStyles.Add(new RowStyle(SizeType.Percent, 28));
-        side.RowStyles.Add(new RowStyle(SizeType.Percent, 42));
-        side.RowStyles.Add(new RowStyle(SizeType.Percent, 30));
+        var scale = DeviceDpi / 96f;
+        side.RowStyles.Add(new RowStyle(SizeType.Absolute, 180 * scale));
+        side.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         side.Controls.Add(BuildOpening(), 0, 0);
         side.Controls.Add(BuildHistory(), 0, 1);
-        side.Controls.Add(BuildMaintenance(), 0, 2);
-        side.MinimumSize = new Size(0, 660);
 
         return side;
     }
 
+    private Control BuildLeft()
+    {
+        var left = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            BackColor = Palette.Canvas,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty
+        };
+
+        left.RowStyles.Add(new RowStyle(SizeType.Percent, 62));
+        left.RowStyles.Add(new RowStyle(SizeType.Percent, 38));
+        left.Controls.Add(_categoriesPanel!, 0, 0);
+        left.Controls.Add(_maintenancePanel!, 0, 1);
+        _categoriesPanel!.Margin = new Padding(0, 0, 0, 14);
+        _maintenancePanel!.Margin = Padding.Empty;
+
+        return left;
+    }
+
     private void UpdateResponsiveLayout()
     {
-        if (_categoriesPanel is null || _sidePanel is null)
+        if (_leftPanel is null || _sidePanel is null)
         {
             return;
         }
 
         var viewportWidth = _scrollHost.ClientSize.Width;
         var viewportHeight = _scrollHost.ClientSize.Height;
-        var isWide = viewportWidth >= 1040;
+        var isWide = viewportWidth >= 960;
+        var scale = _scrollHost.DeviceDpi / 96f;
+        var sideMinimumHeight = (int)Math.Ceiling(490 * scale);
+        var categoryHeight = Math.Max(
+            (int)(320 * scale),
+            Math.Min((int)(420 * scale), (int)(viewportHeight * 0.55)));
         var rootHeight = isWide
-            ? Math.Max(viewportHeight, 660)
-            : Math.Max(360, Math.Min(480, (int)(viewportHeight * 0.55))) + 660;
+            ? Math.Max(viewportHeight, sideMinimumHeight)
+            : categoryHeight + sideMinimumHeight;
         var needsVerticalScroll = rootHeight > viewportHeight;
         var rootWidth = Math.Max(
             0,
@@ -203,14 +232,12 @@ internal sealed class SettingsView : ViewBase
         else
         {
             _rootLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            _rootLayout.RowStyles.Add(new RowStyle(
-                SizeType.Absolute,
-                Math.Max(360, Math.Min(480, (int)(viewportHeight * 0.55)))));
-            _rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 660));
+            _rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, categoryHeight + (int)(190 * scale)));
+            _rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, sideMinimumHeight));
             _rootLayout.SetCellPosition(_sidePanel, new TableLayoutPanelCellPosition(0, 1));
         }
 
-        _rootLayout.SetCellPosition(_categoriesPanel, new TableLayoutPanelCellPosition(0, 0));
+        _rootLayout.SetCellPosition(_leftPanel, new TableLayoutPanelCellPosition(0, 0));
         _rootLayout.Location = Point.Empty;
         _rootLayout.Size = new Size(rootWidth, rootHeight);
         _scrollHost.AutoScrollMinSize = new Size(rootWidth, rootHeight);
@@ -338,9 +365,18 @@ internal sealed class SettingsView : ViewBase
         layout.Controls.Add(_maintenanceStatus, 0, 2);
 
         card.Controls.Add(layout);
-        card.Controls.Add(Ui.Header("Mantenimiento"));
+        card.Controls.Add(Ui.Header(
+            "Sistema y mantenimiento",
+            Ui.Compact(Ui.Action("Acerca de SubTrack", ShowAboutAsync))));
 
         return card;
+    }
+
+    private Task ShowAboutAsync()
+    {
+        using var form = new AboutForm();
+        form.ShowDialog(FindForm());
+        return Task.CompletedTask;
     }
 
     private async Task LoadCategoriesAsync()

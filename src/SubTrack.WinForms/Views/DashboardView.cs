@@ -106,25 +106,11 @@ internal sealed class DashboardView : ViewBase
 
     protected override async Task LoadAsync()
     {
-        var dashboardTask = Context.Services.Dashboard.GetAsync(new GetDashboardRequest(_month.Month));
-        var subscriptionsTask = Context.Services.Subscriptions.GetAllAsync();
-        await Task.WhenAll(dashboardTask, subscriptionsTask);
-
-        var result = await dashboardTask;
+        var result = await Context.Services.Dashboard.GetAsync(new GetDashboardRequest(_month.Month));
         if (Failed(result))
         {
             ClearDashboard();
             return;
-        }
-
-        var subscriptions = await subscriptionsTask;
-        if (Failed(subscriptions))
-        {
-            _names.Clear();
-        }
-        else
-        {
-            _names = subscriptions.Value.ToDictionary(item => item.Id, item => item.Name);
         }
 
         var snapshot = result.Value;
@@ -148,6 +134,16 @@ internal sealed class DashboardView : ViewBase
             $"Ingresos {Format.Money(snapshot.IncomeCents)} · Gastos {Format.Money(snapshot.ExpensesCents)} · Suscripciones {Format.Money(snapshot.SubscriptionPaymentsCents)} · Egresos {Format.Money(snapshot.TotalExpensesCents)}";
         _summaryBalance.Text =
             $"Saldo disponible {Format.Currency(snapshot.CurrentBalanceCents)} · Ahorro proyectado {Format.Currency(snapshot.ProjectedSavingsCents)}";
+
+        var subscriptions = await Context.Services.Subscriptions.GetAllAsync();
+        if (Failed(subscriptions))
+        {
+            _names.Clear();
+        }
+        else
+        {
+            _names = subscriptions.Value.ToDictionary(item => item.Id, item => item.Name);
+        }
 
         Fill(snapshot.OverdueCharges);
 
@@ -312,10 +308,12 @@ internal sealed class DashboardView : ViewBase
         };
 
         var balanceCaption = Ui.Caption("SALDO ACTUAL");
-        balanceCaption.ForeColor = Color.FromArgb(150, 162, 172);
+        balanceCaption.ForeColor = Palette.Muted;
 
         _balance.Text = "—";
         _balanceHint.Text = "Cargando datos...";
+        _balance.ForeColor = Palette.Text;
+        _balanceHint.ForeColor = Palette.Muted;
 
         var projectedCaption = Ui.Caption("AHORRO PROYECTADO");
         projectedCaption.ForeColor = Palette.PrimaryDeep;
@@ -327,7 +325,7 @@ internal sealed class DashboardView : ViewBase
             balanceCaption,
             _balance,
             _balanceHint,
-            Palette.Ink,
+            Palette.Surface,
             new Padding(24, 12, 24, 12),
             new Padding(0, 0, 7, 0),
             28f);
@@ -453,7 +451,6 @@ internal sealed class DashboardView : ViewBase
         {
             Dock = DockStyle.Fill,
             Radius = 18,
-            ShowBorder = false,
             Margin = margin,
             Padding = padding
         };
@@ -754,7 +751,7 @@ internal sealed class DashboardView : ViewBase
         _dashboardMainPanel.Size = new Size(contentWidth, contentHeight);
         if (_dashboardMainPanel is TableLayoutPanel layout && layout.RowStyles.Count == 2)
         {
-            var heroHeight = (int)((_heroCardsStacked ? 270 : 140) * scale);
+            var heroHeight = (int)((_heroCardsStacked ? 225 : 112) * scale);
             var kpisHeight = Math.Max(0, contentHeight - heroHeight);
             layout.RowStyles[0].SizeType = SizeType.Absolute;
             layout.RowStyles[0].Height = heroHeight;

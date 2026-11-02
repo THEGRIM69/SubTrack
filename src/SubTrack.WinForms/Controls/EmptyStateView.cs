@@ -1,4 +1,5 @@
 using SubTrack.WinForms.Themes;
+using SubTrack.WinForms.Theme;
 
 namespace SubTrack.WinForms.Controls;
 
@@ -13,7 +14,7 @@ internal class EmptyStateView : UserControl
         var heading = new Label
         {
             AutoSize = true,
-            Font = AppTheme.TitleFont,
+            Font = Palette.Font(28F),
             ForeColor = AppTheme.TextPrimary,
             Margin = Padding.Empty,
             Text = title
@@ -31,7 +32,7 @@ internal class EmptyStateView : UserControl
         var emptySymbol = new Label
         {
             AutoSize = true,
-            Font = new Font("Segoe UI", 35F, FontStyle.Regular),
+            Font = AppTheme.TitleFont,
             ForeColor = AppTheme.Primary,
             Margin = new Padding(0, 0, 0, 14),
             Text = symbol
@@ -40,7 +41,7 @@ internal class EmptyStateView : UserControl
         var emptyTitle = new Label
         {
             AutoSize = true,
-            Font = new Font("Segoe UI", 13F, FontStyle.Bold),
+            Font = Palette.Font(13F, FontStyle.Bold),
             ForeColor = AppTheme.TextPrimary,
             Margin = new Padding(0, 0, 0, 7),
             Text = "Aún no hay información para mostrar"

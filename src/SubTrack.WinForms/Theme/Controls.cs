@@ -903,7 +903,7 @@ internal static class Ui
         {
             Text = text.ToUpperInvariant(),
             AutoSize = true,
-            Font = Palette.Font(7.75f, FontStyle.Bold),
+            Font = Palette.Font(8.25f, FontStyle.Bold),
             ForeColor = Palette.Muted,
             Margin = new Padding(0)
         };
@@ -924,7 +924,7 @@ internal static class Ui
         var table = new TableLayoutPanel
         {
             Dock = DockStyle.Top,
-            Height = 40,
+            Height = 44,
             ColumnCount = 2,
             RowCount = 1,
             BackColor = Palette.Surface,
@@ -938,7 +938,7 @@ internal static class Ui
         {
             Text = title,
             Dock = DockStyle.Fill,
-            Font = Palette.Font(11f, FontStyle.Bold),
+            Font = Palette.Font(11.5f, FontStyle.Bold),
             ForeColor = Palette.Text,
             TextAlign = ContentAlignment.MiddleLeft,
             Margin = new Padding(0)
@@ -1052,31 +1052,31 @@ internal static class Ui
             BorderStyle = BorderStyle.None,
             EnableHeadersVisualStyles = false,
             ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
-            ColumnHeadersHeight = 42,
+            ColumnHeadersHeight = 44,
             ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.None,
             CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal,
-            GridColor = Color.FromArgb(240, 243, 245),
+            GridColor = Palette.Border,
             Font = Palette.Font(9.5f),
             ShowCellToolTips = true,
             ShowEditingIcon = false
         };
 
-        grid.RowTemplate.Height = 44;
+        grid.RowTemplate.Height = 46;
 
         grid.DefaultCellStyle.BackColor = Palette.Surface;
         grid.DefaultCellStyle.ForeColor = Palette.Text;
         grid.DefaultCellStyle.SelectionBackColor = Palette.PrimarySoft;
         grid.DefaultCellStyle.SelectionForeColor = Palette.Text;
-        grid.DefaultCellStyle.Padding = new Padding(6, 0, 6, 0);
+        grid.DefaultCellStyle.Padding = new Padding(8, 0, 8, 0);
         grid.DefaultCellStyle.Font = Palette.Font(9.5f);
 
-        grid.AlternatingRowsDefaultCellStyle.BackColor = Palette.Surface;
+        grid.AlternatingRowsDefaultCellStyle.BackColor = Palette.SurfaceAlternate;
         grid.AlternatingRowsDefaultCellStyle.SelectionBackColor = Palette.PrimarySoft;
 
         grid.ColumnHeadersDefaultCellStyle.BackColor = Palette.Surface;
         grid.ColumnHeadersDefaultCellStyle.ForeColor = Palette.Muted;
-        grid.ColumnHeadersDefaultCellStyle.Font = Palette.Font(8.25f, FontStyle.Bold);
-        grid.ColumnHeadersDefaultCellStyle.Padding = new Padding(6, 0, 6, 0);
+        grid.ColumnHeadersDefaultCellStyle.Font = Palette.Font(9f, FontStyle.Bold);
+        grid.ColumnHeadersDefaultCellStyle.Padding = new Padding(8, 0, 8, 0);
         grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = Palette.Surface;
         grid.ColumnHeadersDefaultCellStyle.SelectionForeColor = Palette.Muted;
 
