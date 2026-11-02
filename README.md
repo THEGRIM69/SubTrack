@@ -23,6 +23,12 @@ Sistema de escritorio para administrar suscripciones, pagos y gastos.
 ## Compilación
 dotnet build SubTrack.slnx
 
+## Ejecución
+dotnet run --project src/SubTrack.WinForms
+
+La base de datos local se crea en `%LOCALAPPDATA%\SubTrack\data\subtrack.db`.
+Para volver a los datos iniciales, cierra la aplicación y elimina ese archivo.
+
 ## Pruebas
 dotnet test SubTrack.slnx
 
