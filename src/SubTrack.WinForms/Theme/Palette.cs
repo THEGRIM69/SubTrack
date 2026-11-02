@@ -3,9 +3,7 @@ using System.Drawing.Text;
 
 namespace SubTrack.WinForms.Theme;
 
-/// <summary>
-/// Tokens visuales: paleta Petronas (verde/negro) con superficies claras al estilo Apple.
-/// </summary>
+/// <summary>Tokens visuales de la interfaz gris, blanca y turquesa.</summary>
 internal static class Palette
 {
     public static readonly Color Ink = Color.FromArgb(10, 14, 17);
@@ -14,6 +12,7 @@ internal static class Palette
 
     public static readonly Color Canvas = Color.FromArgb(245, 247, 248);
     public static readonly Color Surface = Color.FromArgb(255, 255, 255);
+    public static readonly Color SurfaceAlternate = Color.FromArgb(250, 252, 252);
 
     public static readonly Color Border = Color.FromArgb(228, 233, 236);
     public static readonly Color BorderStrong = Color.FromArgb(209, 218, 223);

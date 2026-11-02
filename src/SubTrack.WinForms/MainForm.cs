@@ -392,7 +392,7 @@ public sealed class MainForm : Form
         {
             Text = "FINANZAS PERSONALES",
             AutoSize = true,
-            Font = Palette.Font(7f, FontStyle.Bold),
+            Font = Palette.Font(8f, FontStyle.Bold),
             ForeColor = Palette.Muted,
             Location = new Point(1, 32),
             Margin = Padding.Empty
