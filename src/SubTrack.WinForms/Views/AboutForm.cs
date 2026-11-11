@@ -219,7 +219,8 @@ internal sealed class AboutForm : Form
         [
             "Ing. Josue Adolfo Perez Hernandez",
             "Ing. Rodrigo Rivera Flores",
-            "Ing. Henrry Giovany Marroquin Valle"
+            "Ing. Henrry Giovany Marroquin Valle",
+            "Ing. Pamela Michelle Tejada Cruz"
         ];
         for (var index = 0; index < developers.Length; index++)
         {
